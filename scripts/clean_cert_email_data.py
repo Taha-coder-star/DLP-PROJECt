@@ -57,8 +57,11 @@ def clean_email_chunk(df: pd.DataFrame) -> pd.DataFrame:
     df["content"] = df["content"].astype(str).str.replace(r"\s+", " ", regex=True).str.strip().str.lower()
 
     df["size"] = pd.to_numeric(df["size"], errors="coerce")
-    df["attachments"] = pd.to_numeric(df["attachments"], errors="coerce")
-    df = df.dropna(subset=["size", "attachments"]).reset_index(drop=True)
+    df = df.dropna(subset=["size"]).reset_index(drop=True)
+    # attachments column contains file paths (semicolon-separated), not a count
+    df["attachments"] = df["attachments"].apply(
+        lambda v: len([x for x in str(v).split(";") if x.strip()]) if pd.notna(v) and str(v).strip() else 0
+    )
 
     df["email_day"] = df["date"].dt.date.astype(str)
     df["email_hour"] = df["date"].dt.hour

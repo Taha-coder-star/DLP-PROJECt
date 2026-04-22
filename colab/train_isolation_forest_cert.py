@@ -58,9 +58,6 @@ FEATURE_COLUMNS = [
     "n",
 ]
 
-TRAIN_FRACTION = 0.80
-
-
 def load_feature_data() -> pd.DataFrame:
     df = pd.read_csv(INPUT_PATH)
     missing = [column for column in FEATURE_COLUMNS if column not in df.columns]
@@ -68,16 +65,16 @@ def load_feature_data() -> pd.DataFrame:
         raise ValueError(f"Missing required feature columns: {missing}")
     df["email_day"] = pd.to_datetime(df["email_day"], errors="coerce")
     df = df.dropna(subset=["email_day"]).sort_values(["email_day", "user"]).reset_index(drop=True)
+    if "dataset_split" not in df.columns:
+        raise ValueError("dataset_split column missing — re-run clean_cert_email_data.py first.")
     return df
 
 
-def split_by_time(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.Timestamp]:
-    unique_days = sorted(df["email_day"].drop_duplicates().tolist())
-    cutoff_index = max(1, int(len(unique_days) * TRAIN_FRACTION))
-    cutoff_day = unique_days[cutoff_index - 1]
-    train_df = df[df["email_day"] <= cutoff_day].copy()
-    test_df = df[df["email_day"] > cutoff_day].copy()
-    return train_df, test_df, cutoff_day
+def split_from_column(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    train_df = df[df["dataset_split"] == "train"].copy()
+    val_df   = df[df["dataset_split"] == "val"].copy()
+    test_df  = df[df["dataset_split"] == "test"].copy()
+    return train_df, val_df, test_df
 
 
 def normalize_scores(raw_scores: pd.Series, scaler: MinMaxScaler) -> pd.Series:
@@ -145,8 +142,8 @@ def train_isolation_forest(
 def build_summary(
     scored_df: pd.DataFrame,
     train_df: pd.DataFrame,
+    val_df: pd.DataFrame,
     test_df: pd.DataFrame,
-    cutoff_day: pd.Timestamp,
     artifacts: dict,
 ) -> dict:
     top_anomalies = (
@@ -159,12 +156,14 @@ def build_summary(
         "rows": int(len(scored_df)),
         "users": int(scored_df["user"].nunique()),
         "train_rows": int(len(train_df)),
+        "val_rows": int(len(val_df)),
         "test_rows": int(len(test_df)),
         "train_start_day": str(train_df["email_day"].min().date()),
         "train_end_day": str(train_df["email_day"].max().date()),
+        "val_start_day": str(val_df["email_day"].min().date()) if not val_df.empty else None,
+        "val_end_day": str(val_df["email_day"].max().date()) if not val_df.empty else None,
         "test_start_day": str(test_df["email_day"].min().date()) if not test_df.empty else None,
         "test_end_day": str(test_df["email_day"].max().date()) if not test_df.empty else None,
-        "cutoff_day": str(cutoff_day.date()),
         "suspicious_threshold": float(artifacts["suspicious_threshold"]),
         "high_threshold": float(artifacts["high_threshold"]),
         "suspicious_rows": int((scored_df["risk_severity"] == "suspicious").sum()),
@@ -189,18 +188,15 @@ def save_outputs(artifacts: dict, scored_df: pd.DataFrame, summary: dict) -> Non
 
 def main() -> None:
     full_df = load_feature_data()
-    train_df, test_df, cutoff_day = split_by_time(full_df)
+    train_df, val_df, test_df = split_from_column(full_df)
     artifacts, scored_df = train_isolation_forest(train_df, full_df)
-    scored_df["dataset_split"] = scored_df["email_day"].apply(
-        lambda value: "train" if value <= cutoff_day else "test"
-    )
-    summary = build_summary(scored_df, train_df, test_df, cutoff_day, artifacts)
+    summary = build_summary(scored_df, train_df, val_df, test_df, artifacts)
     save_outputs(artifacts, scored_df, summary)
 
     print(f"Saved scored dataset to {OUTPUT_PATH}")
     print(f"Saved model to {MODEL_PATH}")
     print(f"Saved summary to {METRICS_PATH}")
-    print(f"Train rows: {len(train_df)} | Test rows: {len(test_df)} | Cutoff day: {cutoff_day.date()}")
+    print(f"Train: {len(train_df)} | Val: {len(val_df)} | Test: {len(test_df)}")
     print(
         scored_df[["user", "email_day", "dataset_split", "iforest_score", "risk_severity"]].head().to_string(index=False)
     )

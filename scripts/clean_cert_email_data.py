@@ -294,6 +294,41 @@ def clean_users_data(df: pd.DataFrame) -> pd.DataFrame:
     ]]
 
 
+def assign_split(df: pd.DataFrame, date_col: str = "email_day",
+                 train_frac: float = 0.70, val_frac: float = 0.15) -> pd.DataFrame:
+    """Add dataset_split column using per-user chronological 70/15/15 split.
+
+    Each user's own timeline is split independently so every user appears in
+    train, val, and test — preventing class imbalance across splits.
+    """
+    df = df.copy()
+    df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
+
+    splits = []
+    for user, grp in df.groupby("user", sort=False):
+        grp = grp.sort_values(date_col).reset_index(drop=True)
+        n = len(grp)
+        train_end = int(n * train_frac)
+        val_end   = int(n * (train_frac + val_frac))
+        grp["dataset_split"] = "test"
+        grp.loc[:train_end - 1, "dataset_split"] = "train"
+        grp.loc[train_end:val_end - 1, "dataset_split"] = "val"
+        splits.append(grp)
+
+    return pd.concat(splits, ignore_index=True)
+
+
+def assign_split_by_date(df: pd.DataFrame, date_col: str,
+                         train_cutoff: str, val_cutoff: str) -> pd.DataFrame:
+    """Add dataset_split to a row-level CSV using global date cutoffs."""
+    df = df.copy()
+    dates = pd.to_datetime(df[date_col], errors="coerce")
+    df["dataset_split"] = "test"
+    df.loc[dates < train_cutoff, "dataset_split"] = "train"
+    df.loc[(dates >= train_cutoff) & (dates < val_cutoff), "dataset_split"] = "val"
+    return df
+
+
 def main() -> None:
     CLEANED_DIR.mkdir(parents=True, exist_ok=True)
     if EMAIL_OUTPUT.exists():
@@ -471,10 +506,31 @@ def main() -> None:
         daily_features[col] = daily_features[col].fillna(0).astype(int)
     print(f"  File user-days: {len(file_daily)}")
 
+    # --- Per-user chronological 70/15/15 split ---
+    daily_features = assign_split(daily_features, date_col="email_day")
     daily_features.to_csv(USER_DAILY_OUTPUT, index=False)
 
     merged = daily_features.merge(psychometric_clean, left_on="user", right_on="user_id", how="left")
     merged.to_csv(MERGED_OUTPUT, index=False)
+
+    # Compute global date cutoffs from the email data for row-level CSV splits
+    all_dates = pd.to_datetime(daily_features["email_day"], errors="coerce").dropna().sort_values()
+    n_days = len(all_dates.unique())
+    train_cutoff = str(sorted(all_dates.unique())[int(n_days * 0.70)])
+    val_cutoff   = str(sorted(all_dates.unique())[int(n_days * 0.85)])
+    print(f"Split cutoffs -> train:<{train_cutoff}  val:<{val_cutoff}  test:rest")
+
+    # Apply date-based split to row-level cleaned CSVs
+    for path, date_col in [
+        (LOGON_OUTPUT,  "date"),
+        (DEVICE_OUTPUT, "date"),
+        (FILE_OUTPUT,   "date"),
+    ]:
+        if path.exists():
+            tmp = pd.read_csv(path)
+            tmp = assign_split_by_date(tmp, date_col, train_cutoff, val_cutoff)
+            tmp.to_csv(path, index=False)
+            print(f"  Split added to {path.name}: train={( tmp['dataset_split']=='train').sum()} val={(tmp['dataset_split']=='val').sum()} test={(tmp['dataset_split']=='test').sum()}")
 
     summary_lines = [
         f"clean_email_rows={total_clean_rows}",

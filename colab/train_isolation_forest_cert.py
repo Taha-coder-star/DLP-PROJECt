@@ -134,7 +134,7 @@ def train_isolation_forest(
         "feature_columns": FEATURE_COLUMNS,
         "suspicious_threshold": suspicious_threshold,
         "high_threshold": high_threshold,
-        "train_fraction": TRAIN_FRACTION,
+
     }
     return artifacts, scored_df
 

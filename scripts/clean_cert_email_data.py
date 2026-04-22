@@ -345,69 +345,84 @@ def main() -> None:
     psychometric_clean.to_csv(PSY_OUTPUT, index=False)
 
     # --- Clean logon (row-level) ---
-    print("Cleaning logon data...")
-    if LOGON_OUTPUT.exists():
-        LOGON_OUTPUT.unlink()
-    logon_header_written = False
-    logon_seen_ids: set = set()
-    total_logon_rows = 0
-    for chunk in pd.read_csv(LOGON_INPUT, chunksize=CHUNK_SIZE):
-        cleaned_logon = clean_logon_chunk(chunk)
-        cleaned_logon = cleaned_logon[~cleaned_logon["id"].isin(logon_seen_ids)].copy()
-        logon_seen_ids.update(cleaned_logon["id"].tolist())
-        if not cleaned_logon.empty:
-            cleaned_logon.to_csv(LOGON_OUTPUT, mode="a", header=not logon_header_written, index=False)
-            logon_header_written = True
-            total_logon_rows += len(cleaned_logon)
-    print(f"  Saved {total_logon_rows} cleaned logon rows ->{LOGON_OUTPUT}")
+    if not LOGON_INPUT.exists():
+        print("Skipping logon data (logon.csv not found in archive).")
+    else:
+        print("Cleaning logon data...")
+        if LOGON_OUTPUT.exists():
+            LOGON_OUTPUT.unlink()
+        logon_header_written = False
+        logon_seen_ids: set = set()
+        total_logon_rows = 0
+        for chunk in pd.read_csv(LOGON_INPUT, chunksize=CHUNK_SIZE):
+            cleaned_logon = clean_logon_chunk(chunk)
+            cleaned_logon = cleaned_logon[~cleaned_logon["id"].isin(logon_seen_ids)].copy()
+            logon_seen_ids.update(cleaned_logon["id"].tolist())
+            if not cleaned_logon.empty:
+                cleaned_logon.to_csv(LOGON_OUTPUT, mode="a", header=not logon_header_written, index=False)
+                logon_header_written = True
+                total_logon_rows += len(cleaned_logon)
+        print(f"  Saved {total_logon_rows} cleaned logon rows ->{LOGON_OUTPUT}")
 
     # --- Clean device (row-level) ---
-    print("Cleaning device data...")
-    if DEVICE_OUTPUT.exists():
-        DEVICE_OUTPUT.unlink()
-    device_header_written = False
-    device_seen_ids: set = set()
-    total_device_rows = 0
-    for chunk in pd.read_csv(DEVICE_INPUT, chunksize=CHUNK_SIZE):
-        cleaned_device = clean_device_chunk(chunk)
-        cleaned_device = cleaned_device[~cleaned_device["id"].isin(device_seen_ids)].copy()
-        device_seen_ids.update(cleaned_device["id"].tolist())
-        if not cleaned_device.empty:
-            cleaned_device.to_csv(DEVICE_OUTPUT, mode="a", header=not device_header_written, index=False)
-            device_header_written = True
-            total_device_rows += len(cleaned_device)
-    print(f"  Saved {total_device_rows} cleaned device rows ->{DEVICE_OUTPUT}")
+    if not DEVICE_INPUT.exists():
+        print("Skipping device data (device.csv not found in archive).")
+    else:
+        print("Cleaning device data...")
+        if DEVICE_OUTPUT.exists():
+            DEVICE_OUTPUT.unlink()
+        device_header_written = False
+        device_seen_ids: set = set()
+        total_device_rows = 0
+        for chunk in pd.read_csv(DEVICE_INPUT, chunksize=CHUNK_SIZE):
+            cleaned_device = clean_device_chunk(chunk)
+            cleaned_device = cleaned_device[~cleaned_device["id"].isin(device_seen_ids)].copy()
+            device_seen_ids.update(cleaned_device["id"].tolist())
+            if not cleaned_device.empty:
+                cleaned_device.to_csv(DEVICE_OUTPUT, mode="a", header=not device_header_written, index=False)
+                device_header_written = True
+                total_device_rows += len(cleaned_device)
+        print(f"  Saved {total_device_rows} cleaned device rows ->{DEVICE_OUTPUT}")
 
     # --- Clean file (row-level) ---
-    print("Cleaning file access data...")
-    if FILE_OUTPUT.exists():
-        FILE_OUTPUT.unlink()
-    file_header_written = False
-    file_seen_ids: set = set()
-    total_file_rows = 0
-    for chunk in pd.read_csv(FILE_INPUT, chunksize=CHUNK_SIZE):
-        cleaned_file = clean_file_chunk(chunk)
-        cleaned_file = cleaned_file[~cleaned_file["id"].isin(file_seen_ids)].copy()
-        file_seen_ids.update(cleaned_file["id"].tolist())
-        if not cleaned_file.empty:
-            cleaned_file.to_csv(FILE_OUTPUT, mode="a", header=not file_header_written, index=False)
-            file_header_written = True
-            total_file_rows += len(cleaned_file)
-    print(f"  Saved {total_file_rows} cleaned file rows ->{FILE_OUTPUT}")
+    if not FILE_INPUT.exists():
+        print("Skipping file access data (file.csv not found in archive).")
+    else:
+        print("Cleaning file access data...")
+        if FILE_OUTPUT.exists():
+            FILE_OUTPUT.unlink()
+        file_header_written = False
+        file_seen_ids: set = set()
+        total_file_rows = 0
+        for chunk in pd.read_csv(FILE_INPUT, chunksize=CHUNK_SIZE):
+            cleaned_file = clean_file_chunk(chunk)
+            cleaned_file = cleaned_file[~cleaned_file["id"].isin(file_seen_ids)].copy()
+            file_seen_ids.update(cleaned_file["id"].tolist())
+            if not cleaned_file.empty:
+                cleaned_file.to_csv(FILE_OUTPUT, mode="a", header=not file_header_written, index=False)
+                file_header_written = True
+                total_file_rows += len(cleaned_file)
+        print(f"  Saved {total_file_rows} cleaned file rows ->{FILE_OUTPUT}")
 
     # --- Clean decoy_file ---
-    print("Cleaning decoy file data...")
-    decoy_df = pd.read_csv(DECOY_FILE_INPUT)
-    decoy_clean = clean_decoy_file_data(decoy_df)
-    decoy_clean.to_csv(DECOY_FILE_OUTPUT, index=False)
-    print(f"  Saved {len(decoy_clean)} cleaned decoy file rows ->{DECOY_FILE_OUTPUT}")
+    if not DECOY_FILE_INPUT.exists():
+        print("Skipping decoy file data (decoy_file.csv not found in archive).")
+    else:
+        print("Cleaning decoy file data...")
+        decoy_df = pd.read_csv(DECOY_FILE_INPUT)
+        decoy_clean = clean_decoy_file_data(decoy_df)
+        decoy_clean.to_csv(DECOY_FILE_OUTPUT, index=False)
+        print(f"  Saved {len(decoy_clean)} cleaned decoy file rows ->{DECOY_FILE_OUTPUT}")
 
     # --- Clean users ---
-    print("Cleaning users data...")
-    users_df = pd.read_csv(USERS_INPUT)
-    users_clean = clean_users_data(users_df)
-    users_clean.to_csv(USERS_OUTPUT, index=False)
-    print(f"  Saved {len(users_clean)} cleaned user rows ->{USERS_OUTPUT}")
+    if not USERS_INPUT.exists():
+        print("Skipping users data (users.csv not found in archive).")
+    else:
+        print("Cleaning users data...")
+        users_df = pd.read_csv(USERS_INPUT)
+        users_clean = clean_users_data(users_df)
+        users_clean.to_csv(USERS_OUTPUT, index=False)
+        print(f"  Saved {len(users_clean)} cleaned user rows ->{USERS_OUTPUT}")
 
     daily_features = pd.concat(summary_rows, ignore_index=True)
     daily_features = daily_features.groupby(["user", "email_day"]).agg(

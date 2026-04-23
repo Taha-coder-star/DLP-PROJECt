@@ -16,7 +16,7 @@ sys.path.insert(0, str(_CODE_ROOT))
 if str(_CODE_ROOT / "colab") not in sys.path:
     sys.path.insert(0, str(_CODE_ROOT / "colab"))
 
-from config import CLEANED_DIR, MODELS_DIR  # noqa: E402
+from config import ARCHIVE_DIR, CLEANED_DIR, MODELS_DIR  # noqa: E402
 from inference_isolation_forest_cert import (  # noqa: E402
     load_artifacts as load_iforest_artifacts,
     score_single_row,

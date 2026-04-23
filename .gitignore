@@ -4,6 +4,7 @@ cleaned/
 models/
 plots/
 *.csv
+!archive/answers/answers/insiders.csv
 *.pkl
 
 # ── Python ────────────────────────────────────────────────────────────────────

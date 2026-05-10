@@ -258,18 +258,23 @@ def main() -> None:
     # ── Idea 14: 3-way voting ensemble ────────────────────────────────────────
     voting_rows = print_3way_table(lstm_user_df, if_user_df, risk_df, insider_users)
 
-    # ── Best configuration summary ─────────────────────────────────────────────
+    # ── Phase 4 preliminary best-config summary ───────────────────────────────
     best_meta   = max(meta_rows,   key=lambda r: r["f1"])
     best_voting = max(voting_rows, key=lambda r: r["f1"])
     n_ins = len(insider_users)
     print("=" * 68)
+    print("  Phase 4 Preliminary Results  (full comparison follows in user_level_eval.py)")
+    print("-" * 68)
     print("  Best meta-model  : "
           f"K={best_meta['k']}  F1={best_meta['f1']:.4f}  "
           f"TP={best_meta['tp']}/{n_ins}  Prec={best_meta['precision']:.4f}")
     print("  Best 3-way vote  : "
           f"K={best_voting['k']}  F1={best_voting['f1']:.4f}  "
           f"TP={best_voting['tp']}/{n_ins}  Prec={best_voting['precision']:.4f}")
-    print("=" * 68 + "\n")
+    print("=" * 68)
+    print("  >>> FINAL PROJECT RESULTS (with standalone comparison) will be")
+    print("  >>> printed at the end of user_level_eval.py output.")
+    print()
 
     # ── Save outputs ──────────────────────────────────────────────────────────
     MODELS_DIR.mkdir(parents=True, exist_ok=True)

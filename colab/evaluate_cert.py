@@ -180,7 +180,10 @@ def main() -> None:
     REPORT_PATH.write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(f"\nSaved evaluation report to: {REPORT_PATH}")
 
-    print("\nSUMMARY")
+    print("\nDay-Level Signal Diagnostics  (intermediate — not the final result)")
+    print("  These metrics measure raw day-level detection by IF/LSTM thresholds.")
+    print("  Final user-level and meta-model results follow in user_level_eval.py.")
+    print()
     sections = ("if_day_test", "if_day_all", "if_user_all",
                  "lstm_day_test", "lstm_day_all", "lstm_user_all")
     headers  = ("IF Day(test)", "IF Day(all)", "IF User",

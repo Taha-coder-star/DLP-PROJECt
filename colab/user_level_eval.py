@@ -255,15 +255,15 @@ def print_agg_comparison(records: list[dict]) -> None:
 
 
 # =============================================================================
-# Step 10 -- summary
+# Step 10 -- best standalone detector (unsupervised anomaly models only)
 # =============================================================================
 
-def print_summary(records: list[dict], n_insiders: int) -> None:
+def print_standalone_best(records: list[dict], n_insiders: int) -> None:
     df   = pd.DataFrame(records)
     best = df.sort_values("f1", ascending=False).iloc[0]
     w    = 65
     print("=" * w)
-    print("  Step 10 -- Best overall configuration")
+    print("  Step 10 -- Best Standalone Detector  (unsupervised anomaly models only)")
     print("=" * w)
     print(f"  Model      : {best['model']}")
     print(f"  Aggregation: {best['agg']}")
@@ -275,15 +275,74 @@ def print_summary(records: list[dict], n_insiders: int) -> None:
     print(f"  TP         : {int(best['tp'])} / {n_insiders} insiders detected")
     print("=" * w)
     print()
-    print("  Key findings:")
-    print("  - IF scores insiders LOWER than normals on all aggregations")
-    print("    (ROC < 0.5 -- model inverts). Ranking IF descending surfaces")
-    print("    normal users, not insiders. IF is not useful here.")
+    print("  Key findings (standalone unsupervised models):")
+    print("  - With Phase 2 features (velocity, external recipients, cyclical time)")
+    print("    IF now scores insiders HIGHER and achieves the best standalone F1.")
     print("  - LSTM score_max = 1.0 for virtually every user -- no signal.")
     print("  - LSTM score_p95 (per-user 95th pct of daily scores) gives the")
-    print("    strongest insider/normal separation and is the correct")
-    print("    aggregation. Threshold must be computed on user-level p95")
-    print("    scores of train users, not on raw daily rows.")
+    print("    strongest LSTM insider/normal separation.")
+    print("  - Neither standalone model is the final system.")
+    print("  >>> The supervised meta-model ensemble is the true final result.")
+    print("  >>> See FINAL PROJECT RESULTS at the end of this output.")
+    print()
+
+
+# =============================================================================
+# Final consolidated summary
+# =============================================================================
+
+def print_final_summary(
+    all_records: list[dict],
+    insider_users: set[str],
+    meta_results: list[dict] | None = None,
+) -> None:
+    """Print a single consolidated summary comparing standalone vs meta-model."""
+    n_insiders = len(insider_users)
+    df   = pd.DataFrame(all_records)
+    best = df.sort_values("f1", ascending=False).iloc[0]
+    w    = 65
+
+    print("\n" + "=" * w)
+    print("  FINAL PROJECT RESULTS")
+    print("=" * w)
+
+    print()
+    print("  ── Best Standalone Detector (unsupervised) ─────────────────")
+    print(f"  {best['model']} ({best['agg']})")
+    print(f"  TP        : {int(best['tp'])} / {n_insiders} insiders detected")
+    print(f"  Precision : {best['precision']:.4f}")
+    print(f"  Recall    : {best['recall']:.4f}")
+    print(f"  F1        : {best['f1']:.4f}")
+
+    if meta_results:
+        best_meta = max(meta_results, key=lambda r: r["f1"])
+        delta_tp  = best_meta["tp"] - int(best["tp"])
+        sign      = "+" if delta_tp >= 0 else ""
+
+        print()
+        print("  ── Best Overall System: Meta-Model Ensemble ────────────────")
+        print("  Supervised Logistic Regression stacked on all normalised signals")
+        print(f"  K         : {best_meta['k']}")
+        print(f"  TP        : {best_meta['tp']} / {n_insiders} insiders detected")
+        print(f"  FP        : {best_meta['fp']}")
+        print(f"  FN        : {best_meta['fn']}")
+        print(f"  Precision : {best_meta['precision']:.4f}")
+        print(f"  Recall    : {best_meta['recall']:.4f}")
+        print(f"  F1        : {best_meta['f1']:.4f}")
+
+        print()
+        print(f"  ── Improvement over standalone {best['model']} ─────────────")
+        print(f"  {sign}{delta_tp} additional insiders detected")
+        print(f"  Precision : {best['precision']:.4f}  →  {best_meta['precision']:.4f}")
+        print(f"  Recall    : {best['recall']:.4f}  →  {best_meta['recall']:.4f}")
+        print(f"  F1        : {best['f1']:.4f}  →  {best_meta['f1']:.4f}")
+    else:
+        print()
+        print("  ── Meta-Model Ensemble ─────────────────────────────────────")
+        print("  [not yet run]  Execute colab/meta_model.py to enable Phase 4.")
+
+    print()
+    print("=" * w)
     print()
 
 
@@ -389,10 +448,10 @@ def main() -> None:
         print(f"[SKIP] {LSTM_CSV} not found")
 
     if all_records:
-        print_agg_comparison(all_records)  # Step 8
-        print_summary(all_records, len(insider_users))  # Step 10
+        print_agg_comparison(all_records)        # Step 8: per-(model, agg) best F1
+        print_standalone_best(all_records, len(insider_users))  # Step 10: standalone winner
 
-    # Idea 3: OR ensemble
+    # Idea 3: OR ensemble (intermediate — superseded by meta-model)
     if IFOREST_CSV.exists() and LSTM_CSV.exists():
         _e_cols = ["user", "lstm_score", "lstm_risk_severity", "dataset_split"]
         _e_avail = pd.read_csv(LSTM_CSV, nrows=0).columns.tolist()
@@ -406,31 +465,46 @@ def main() -> None:
         if_u   = compute_user_scores(idf_e, "iforest_score", insider_users)
         print_ensemble_table(lstm_u, if_u, insider_users)
 
-    # Idea 13: meta-model evaluation (if meta_model.py has already run)
+    # ── Phase 4: Meta-model ensemble — FINAL SYSTEM ──────────────────────────
+    meta_results: list[dict] = []
     if META_SCORES_CSV.exists():
         meta_df = pd.read_csv(META_SCORES_CSV)
         meta_df["user"] = meta_df["user"].astype(str)
         n_ins = len(insider_users)
         w = 65
+
         print("\n" + "=" * w)
-        print("  Phase 4 Idea 13 — Meta-model top-K evaluation")
+        print("  Phase 4 — Meta-Model Ensemble  *** FINAL SYSTEM ***")
+        print("  Supervised Logistic Regression stacked on all normalised signals.")
+        print("  Trained on CERT ground-truth labels (train-split users only).")
         print("=" * w)
         print(f"  {'K':>5}  {'Precision':>10}  {'Recall':>8}  {'F1':>8}"
               f"  {'TP':>4}  {'FP':>5}  {'FN':>4}")
         print("  " + "-" * (w - 2))
         for k in K_VALUES:
             actual_k = min(k, len(meta_df))
-            top_k = set(meta_df.nlargest(actual_k, "meta_score")["user"])
-            tp = len(top_k & insider_users)
-            fp = actual_k - tp
-            fn = n_ins - tp
-            prec   = tp / actual_k if actual_k else 0.0
-            recall = tp / n_ins    if n_ins    else 0.0
-            f1     = 2*prec*recall/(prec+recall) if (prec+recall) > 0 else 0.0
-            star = "*" if actual_k < k else ""
+            top_k    = set(meta_df.nlargest(actual_k, "meta_score")["user"])
+            tp       = len(top_k & insider_users)
+            fp       = actual_k - tp
+            fn       = n_ins - tp
+            prec     = tp / actual_k if actual_k else 0.0
+            recall   = tp / n_ins    if n_ins    else 0.0
+            f1       = 2 * prec * recall / (prec + recall) if (prec + recall) > 0 else 0.0
+            star     = "*" if actual_k < k else ""
             print(f"  {k}{star:<1}  {prec:>10.4f}  {recall:>8.4f}"
                   f"  {f1:>8.4f}  {tp:>4}  {fp:>5}  {fn:>4}")
-        print("=" * w + "\n")
+            meta_results.append({
+                "k": k, "actual_k": actual_k,
+                "tp": tp, "fp": fp, "fn": fn,
+                "precision": prec, "recall": recall, "f1": f1,
+            })
+        print("=" * w)
+    else:
+        print("\n[INFO] Meta-model scores not found — run colab/meta_model.py first.")
+
+    # ── Final consolidated summary (always last) ──────────────────────────────
+    if all_records:
+        print_final_summary(all_records, insider_users, meta_results or None)
 
 
 if __name__ == "__main__":

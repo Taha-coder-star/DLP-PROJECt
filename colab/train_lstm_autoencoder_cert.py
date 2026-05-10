@@ -4,6 +4,10 @@ Global LSTM autoencoder for insider threat anomaly detection on CERT daily email
 Single model trained on all users' training windows combined — much faster than
 per-user training, fills the GPU properly, and learns cross-user behavioral norms.
 Reconstruction error on a 7-day sliding window is the anomaly score.
+
+Per-user z-score normalization is applied before the global MinMaxScaler so that
+each user's features are measured against their own baseline rather than the global
+population. This significantly improves recall for gradual and short-window insiders.
 """
 
 from __future__ import annotations
@@ -40,16 +44,21 @@ BEHAVIORAL_FEATURES = [
     "file_write_count", "file_after_hours",
 ]
 
-WINDOW_SIZE   = 7
-HIDDEN_DIM    = 64    # larger than per-user model — global model sees far more data
-LATENT_DIM    = 32
-EPOCHS        = 20
-BATCH_SIZE    = 256   # large batch keeps GPU busy
-LEARNING_RATE = 1e-3
+WINDOW_SIZE    = 7
+HIDDEN_DIM     = 64
+LATENT_DIM     = 32
+EPOCHS         = 20
+BATCH_SIZE     = 256
+LEARNING_RATE  = 1e-3
+MIN_TRAIN_DAYS = 3     # users below this fall back to global z-score stats
+ZSCORE_CLIP    = 5.0   # clip z-scores to [-5, 5] to suppress extreme outliers
+
+# Type alias for per-user normalization stats
+UserStats = dict[str, tuple[np.ndarray, np.ndarray]]  # user -> (mean, std)
 
 
 # ---------------------------------------------------------------------------
-# Model — same encoder-decoder structure, bigger dims
+# Model
 # ---------------------------------------------------------------------------
 
 class LSTMAutoencoder(nn.Module):
@@ -83,6 +92,52 @@ def make_windows(arr: np.ndarray, window_size: int) -> np.ndarray:
     ).astype(np.float32)
 
 
+def compute_user_stats(
+    df: pd.DataFrame,
+) -> tuple[UserStats, np.ndarray, np.ndarray]:
+    """
+    Compute per-user mean and std from training rows only (no leakage).
+
+    Users with fewer than MIN_TRAIN_DAYS training days fall back to global stats.
+    Returns (user_stats_dict, global_mean, global_std).
+    """
+    train_df    = df[df["dataset_split"] == "train"]
+    train_vals  = train_df[BEHAVIORAL_FEATURES].fillna(0).values
+    global_mean = train_vals.mean(axis=0)
+    global_std  = train_vals.std(axis=0) + 1e-8
+
+    stats: UserStats = {}
+    for user, grp in train_df.groupby("user"):
+        vals = grp[BEHAVIORAL_FEATURES].fillna(0).values
+        if len(vals) >= MIN_TRAIN_DAYS:
+            stats[user] = (vals.mean(axis=0), vals.std(axis=0) + 1e-8)
+        else:
+            stats[user] = (global_mean, global_std)
+
+    return stats, global_mean, global_std
+
+
+def zscore_user(
+    vals: np.ndarray,
+    mean: np.ndarray,
+    std: np.ndarray,
+) -> np.ndarray:
+    """Z-score normalize and clip to ZSCORE_CLIP standard deviations."""
+    return np.clip((vals - mean) / std, -ZSCORE_CLIP, ZSCORE_CLIP).astype(np.float32)
+
+
+def normalize(
+    vals: np.ndarray,
+    user: str,
+    user_stats: UserStats,
+    global_stats: tuple[np.ndarray, np.ndarray],
+    scaler: MinMaxScaler,
+) -> np.ndarray:
+    """Apply per-user z-score then global MinMaxScaler."""
+    mean, std = user_stats.get(user, global_stats)
+    return scaler.transform(zscore_user(vals, mean, std)).astype(np.float32)
+
+
 def batch_reconstruction_errors(
     model: LSTMAutoencoder,
     windows: np.ndarray,
@@ -93,7 +148,6 @@ def batch_reconstruction_errors(
     errors = []
     with torch.no_grad():
         for start in range(0, len(windows), BATCH_SIZE):
-            # Move each mini-batch to GPU — avoids OOM from loading everything at once
             batch = torch.tensor(
                 windows[start : start + BATCH_SIZE], dtype=torch.float32, device=device
             )
@@ -119,19 +173,23 @@ def load_feature_data() -> pd.DataFrame:
     return df
 
 
-def build_global_training_windows(df: pd.DataFrame, scaler: MinMaxScaler) -> np.ndarray:
+def build_global_training_windows(
+    df: pd.DataFrame,
+    scaler: MinMaxScaler,
+    user_stats: UserStats,
+    global_stats: tuple[np.ndarray, np.ndarray],
+) -> np.ndarray:
     """
     Build all 7-day windows from every user's train-split rows.
-    Windows from all users are concatenated into one big array for the DataLoader.
+    Features are per-user z-scored then globally scaled before windowing.
     """
     all_windows = []
     train_df = df[df["dataset_split"] == "train"]
 
-    for _, user_rows in train_df.groupby("user", sort=False):
+    for user, user_rows in train_df.groupby("user", sort=False):
         user_rows = user_rows.sort_values("email_day")
-        scaled = scaler.transform(
-            user_rows[BEHAVIORAL_FEATURES].fillna(0).values
-        ).astype(np.float32)
+        raw    = user_rows[BEHAVIORAL_FEATURES].fillna(0).values
+        scaled = normalize(raw, user, user_stats, global_stats, scaler)
         windows = make_windows(scaled, WINDOW_SIZE)
         if len(windows) > 0:
             all_windows.append(windows)
@@ -139,7 +197,7 @@ def build_global_training_windows(df: pd.DataFrame, scaler: MinMaxScaler) -> np.
     if not all_windows:
         raise ValueError("No training windows found — check dataset_split labels.")
 
-    combined = np.concatenate(all_windows, axis=0)  # (total_windows, 7, n_features)
+    combined = np.concatenate(all_windows, axis=0)
     print(f"  Total training windows: {len(combined):,} from {len(all_windows)} users")
     return combined
 
@@ -153,11 +211,10 @@ def train_global_model(
     device: torch.device,
 ) -> LSTMAutoencoder:
     """Train a single LSTM autoencoder on all users' training windows."""
-    model    = LSTMAutoencoder(len(BEHAVIORAL_FEATURES), HIDDEN_DIM, LATENT_DIM).to(device)
+    model     = LSTMAutoencoder(len(BEHAVIORAL_FEATURES), HIDDEN_DIM, LATENT_DIM).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
-    loss_fn  = nn.MSELoss()
+    loss_fn   = nn.MSELoss()
 
-    # Pin memory speeds up CPU->GPU transfers for large batches
     dataset = TensorDataset(torch.tensor(train_windows))
     loader  = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, pin_memory=True)
 
@@ -165,7 +222,7 @@ def train_global_model(
     for epoch in range(1, EPOCHS + 1):
         epoch_loss = 0.0
         for (batch,) in loader:
-            batch = batch.to(device, non_blocking=True)  # async GPU transfer
+            batch = batch.to(device, non_blocking=True)
             optimizer.zero_grad()
             recon = model(batch)
             loss  = loss_fn(recon, batch)
@@ -191,11 +248,13 @@ def score_all_users(
     suspicious_threshold: float,
     high_threshold: float,
     device: torch.device,
+    user_stats: UserStats,
+    global_stats: tuple[np.ndarray, np.ndarray],
 ) -> pd.DataFrame:
     """
-    Score every user-day using the single global model.
-    For each user: scale their full sequence, build sliding windows,
-    run through the model, map errors back to days.
+    Score every user-day using the global model with per-user z-score normalization.
+    Each user's features are measured against their own training-period baseline,
+    so gradual drift and burst anomalies stand out relative to personal norms.
     """
     scored_chunks = []
 
@@ -203,28 +262,25 @@ def score_all_users(
         user_rows = user_rows.sort_values("email_day").reset_index(drop=True)
         n_days    = len(user_rows)
 
-        scaled  = scaler.transform(
-            user_rows[BEHAVIORAL_FEATURES].fillna(0).values
-        ).astype(np.float32)
+        raw     = user_rows[BEHAVIORAL_FEATURES].fillna(0).values
+        scaled  = normalize(raw, user, user_stats, global_stats, scaler)
         windows = make_windows(scaled, WINDOW_SIZE)
 
-        # Map window reconstruction errors back to the last day of each window
         day_errors = np.full(n_days, np.nan)
         if len(windows) > 0:
             errors = batch_reconstruction_errors(model, windows, device)
             for i, err in enumerate(errors):
                 day_errors[i + WINDOW_SIZE - 1] = float(err)
 
-        # Normalize to [0, 1] relative to global training error range
         day_scores = np.clip(
             (day_errors - suspicious_threshold * 0.5) /
             (high_threshold - suspicious_threshold * 0.5 + 1e-9),
             0.0, 1.0,
         )
 
-        user_rows["lstm_raw_error"]    = day_errors
-        user_rows["lstm_score"]        = day_scores
-        user_rows["lstm_flag"]         = (
+        user_rows["lstm_raw_error"]     = day_errors
+        user_rows["lstm_score"]         = day_scores
+        user_rows["lstm_flag"]          = (
             (~np.isnan(day_scores)) & (day_scores >= 0.5)
         ).astype(int)
         user_rows["lstm_risk_severity"] = [
@@ -259,7 +315,7 @@ def build_summary(scored_df: pd.DataFrame) -> dict:
         .to_dict(orient="records")
     )
     return {
-        "model_type": "global",
+        "model_type": "global_per_user_zscore",
         "rows": int(len(scored_df)),
         "users": int(scored_df["user"].nunique()),
         "window_size": WINDOW_SIZE,
@@ -267,8 +323,10 @@ def build_summary(scored_df: pd.DataFrame) -> dict:
         "latent_dim": LATENT_DIM,
         "epochs": EPOCHS,
         "batch_size": BATCH_SIZE,
-        "suspicious_rows": int((scored_df["lstm_risk_severity"] == "suspicious").sum()),
-        "high_rows":       int((scored_df["lstm_risk_severity"] == "high").sum()),
+        "min_train_days": MIN_TRAIN_DAYS,
+        "zscore_clip": ZSCORE_CLIP,
+        "suspicious_rows":   int((scored_df["lstm_risk_severity"] == "suspicious").sum()),
+        "high_rows":         int((scored_df["lstm_risk_severity"] == "high").sum()),
         "undetermined_rows": int((scored_df["lstm_risk_severity"] == "undetermined").sum()),
         "top_anomalies": top,
     }
@@ -281,19 +339,23 @@ def save_outputs(
     high_threshold: float,
     scored_df: pd.DataFrame,
     summary: dict,
+    user_stats: UserStats,
+    global_stats: tuple[np.ndarray, np.ndarray],
 ) -> None:
     MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
 
     artifacts = {
-        "model_state": {k: v.cpu() for k, v in model.state_dict().items()},
-        "scaler": scaler,
-        "feature_columns": BEHAVIORAL_FEATURES,
-        "window_size": WINDOW_SIZE,
-        "hidden_dim": HIDDEN_DIM,
-        "latent_dim": LATENT_DIM,
+        "model_state":        {k: v.cpu() for k, v in model.state_dict().items()},
+        "scaler":             scaler,
+        "feature_columns":    BEHAVIORAL_FEATURES,
+        "window_size":        WINDOW_SIZE,
+        "hidden_dim":         HIDDEN_DIM,
+        "latent_dim":         LATENT_DIM,
         "suspicious_threshold": suspicious_threshold,
-        "high_threshold": high_threshold,
-        "model_type": "global",
+        "high_threshold":     high_threshold,
+        "model_type":         "global_per_user_zscore",
+        "user_stats":         user_stats,
+        "global_stats":       global_stats,
     }
     with open(MODEL_PATH, "wb") as f:
         pickle.dump(artifacts, f)
@@ -318,15 +380,33 @@ def main() -> None:
     for split in ["train", "val", "test"]:
         print(f"  {split}: {(df['dataset_split'] == split).sum():,} rows")
 
-    # Fit global scaler on training data only to avoid data leakage
-    print("\nFitting global scaler on training data...")
-    train_df = df[df["dataset_split"] == "train"]
-    scaler   = MinMaxScaler()
-    scaler.fit(train_df[BEHAVIORAL_FEATURES].fillna(0).values)
+    # Compute per-user z-score stats from training data only (no leakage)
+    print("\nComputing per-user z-score statistics from training data...")
+    user_stats, global_mean, global_std = compute_user_stats(df)
+    global_stats = (global_mean, global_std)
+    n_fallback = sum(
+        1 for user in df["user"].unique()
+        if user not in user_stats
+    )
+    print(f"  Per-user stats: {len(user_stats)} users")
+    print(f"  Global fallback applied to: {n_fallback} users with no training rows")
 
-    # Build all training windows from all users combined
+    # Fit global scaler on z-scored training data only (no leakage)
+    print("\nFitting global MinMaxScaler on z-scored training data...")
+    train_df = df[df["dataset_split"] == "train"]
+    zscored_train_blocks = []
+    for user, grp in train_df.groupby("user"):
+        raw  = grp[BEHAVIORAL_FEATURES].fillna(0).values
+        mean, std = user_stats.get(user, global_stats)
+        zscored_train_blocks.append(zscore_user(raw, mean, std))
+    train_zscored = np.vstack(zscored_train_blocks)
+    scaler = MinMaxScaler()
+    scaler.fit(train_zscored)
+    print(f"  Scaler fitted on {len(train_zscored):,} z-scored training rows")
+
+    # Build all training windows
     print("\nBuilding training windows...")
-    train_windows = build_global_training_windows(df, scaler)
+    train_windows = build_global_training_windows(df, scaler, user_stats, global_stats)
 
     # Train single global model
     print("\nTraining global LSTM autoencoder...")
@@ -334,7 +414,7 @@ def main() -> None:
 
     # Compute global thresholds from training reconstruction errors
     print("\nComputing global anomaly thresholds...")
-    train_errors      = batch_reconstruction_errors(model, train_windows, device)
+    train_errors         = batch_reconstruction_errors(model, train_windows, device)
     suspicious_threshold = float(np.percentile(train_errors, 95))
     high_threshold       = float(np.percentile(train_errors, 99))
     print(f"  Suspicious threshold (p95): {suspicious_threshold:.6f}")
@@ -342,10 +422,16 @@ def main() -> None:
 
     # Score every user-day
     print("\nScoring all users...")
-    scored_df = score_all_users(df, model, scaler, suspicious_threshold, high_threshold, device)
+    scored_df = score_all_users(
+        df, model, scaler, suspicious_threshold, high_threshold, device,
+        user_stats, global_stats,
+    )
 
     summary = build_summary(scored_df)
-    save_outputs(model, scaler, suspicious_threshold, high_threshold, scored_df, summary)
+    save_outputs(
+        model, scaler, suspicious_threshold, high_threshold,
+        scored_df, summary, user_stats, global_stats,
+    )
 
     print(f"\nSaved scored dataset  -> {OUTPUT_PATH}")
     print(f"Saved model artifacts -> {MODEL_PATH}")

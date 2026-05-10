@@ -42,6 +42,13 @@ BEHAVIORAL_FEATURES = [
     "usb_connect_count", "usb_disconnect_count",
     "file_total", "file_to_removable", "file_from_removable",
     "file_write_count", "file_after_hours",
+    # Idea 9: communication graph features
+    "n_external_recipients", "bcc_external_count", "external_email_ratio",
+    # Idea 10: cyclical time encoding
+    "hour_sin", "hour_cos", "weekday_sin", "weekday_cos",
+    # Idea 8: velocity/delta — deviation from 30-day rolling baseline
+    "file_to_removable_delta", "usb_connect_count_delta",
+    "bcc_ratio_delta", "after_hours_ratio_delta",
 ]
 
 WINDOW_SIZE    = 7

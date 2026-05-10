@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -30,6 +31,34 @@ USERS_OUTPUT = CLEANED_DIR / "users_cleaned.csv"
 SUMMARY_OUTPUT = CLEANED_DIR / "cleaning_summary.txt"
 
 CHUNK_SIZE = 200_000
+
+# Idea 9: internal CERT email domain for external-recipient detection
+CERT_DOMAIN = "dtaa.com"
+
+# Idea 8: columns for velocity/delta feature computation
+VELOCITY_COLS = [
+    "file_to_removable", "usb_connect_count",
+    "bcc_ratio", "after_hours_ratio",
+]
+
+
+def add_velocity_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Idea 8: per-user 30-day rolling-mean deviation for key risk signals.
+
+    delta = current_value - rolling_30d_mean(past values)
+    Positive delta flags a user whose behaviour has escalated relative to their
+    own recent baseline — catching gradual-escalation scenario 2 insiders.
+    """
+    df = df.copy().sort_values(["user", "email_day"])
+    for col in VELOCITY_COLS:
+        if col not in df.columns:
+            df[f"{col}_delta"] = 0.0
+            continue
+        rolling_mean = df.groupby("user")[col].transform(
+            lambda x: x.shift(1).rolling(30, min_periods=5).mean()
+        )
+        df[f"{col}_delta"] = (df[col] - rolling_mean).fillna(0.0)
+    return df
 
 
 def normalize_file_schema(df: pd.DataFrame) -> pd.DataFrame:
@@ -135,11 +164,22 @@ def clean_email_chunk(df: pd.DataFrame) -> pd.DataFrame:
     df["has_bcc"] = (df["bcc_recipient_count"] > 0).astype(int)
     df["has_attachment"] = (df["attachments"] > 0).astype(int)
 
+    # Idea 9: communication graph — external recipient detection
+    def _count_external(field: str) -> pd.Series:
+        return df[field].apply(
+            lambda v: sum(1 for a in str(v).split(";")
+                          if a.strip() and CERT_DOMAIN not in a.strip().lower())
+        )
+    df["n_external_to"]       = _count_external("to")
+    df["bcc_external"]        = _count_external("bcc")
+    df["has_external_recip"]  = (df["n_external_to"] > 0).astype(int)
+
     return df[[
         "id", "date", "email_day", "email_hour", "email_month", "email_weekday", "is_after_hours",
         "user", "pc", "sender", "to", "cc", "bcc", "size", "attachments", "has_attachment",
         "to_recipient_count", "cc_recipient_count", "bcc_recipient_count", "total_recipient_count",
-        "has_cc", "has_bcc", "content_length_chars", "content_length_words", "content"
+        "has_cc", "has_bcc", "content_length_chars", "content_length_words", "content",
+        "n_external_to", "bcc_external", "has_external_recip",
     ]]
 
 
@@ -428,6 +468,13 @@ def main() -> None:
                 max_content_words=("content_length_words", "max"),
                 bcc_email_count=("has_bcc", "sum"),
                 cc_email_count=("has_cc", "sum"),
+                # Idea 9: communication graph
+                n_external_recipients=("n_external_to",      "sum"),
+                bcc_external_count=("bcc_external",          "sum"),
+                external_email_ratio=("has_external_recip",  "mean"),
+                # Idea 10: hour needed for cyclical encoding
+                avg_email_hour=("email_hour",     "mean"),
+                email_weekday=("email_weekday",   "first"),
             ).reset_index()
             summary_rows.append(grouped)
             chunk_summaries.append(f"chunk_{chunk_index}_rows={len(cleaned)}")
@@ -541,6 +588,13 @@ def main() -> None:
         max_content_words=("max_content_words", "max"),
         bcc_email_count=("bcc_email_count", "sum"),
         cc_email_count=("cc_email_count", "sum"),
+        # Idea 9: communication graph
+        n_external_recipients=("n_external_recipients", "sum"),
+        bcc_external_count=("bcc_external_count",       "sum"),
+        external_email_ratio=("external_email_ratio",   "mean"),
+        # Idea 10: time
+        avg_email_hour=("avg_email_hour",   "mean"),
+        email_weekday=("email_weekday",     "first"),
     ).reset_index()
     daily_features["attachment_email_ratio"] = daily_features["emails_with_attachments"] / daily_features["email_count"]
     daily_features["after_hours_ratio"] = daily_features["after_hours_emails"] / daily_features["email_count"]
@@ -594,6 +648,25 @@ def main() -> None:
 
     # --- Per-user chronological 70/15/15 split ---
     daily_features = assign_split(daily_features, date_col="email_day")
+
+    # Idea 10: cyclical time encoding (derive from date + avg hour)
+    daily_features["weekday_sin"] = np.sin(
+        2 * np.pi * daily_features["email_weekday"] / 7
+    )
+    daily_features["weekday_cos"] = np.cos(
+        2 * np.pi * daily_features["email_weekday"] / 7
+    )
+    daily_features["hour_sin"] = np.sin(
+        2 * np.pi * daily_features["avg_email_hour"].fillna(12) / 24
+    )
+    daily_features["hour_cos"] = np.cos(
+        2 * np.pi * daily_features["avg_email_hour"].fillna(12) / 24
+    )
+
+    # Idea 8: velocity/delta features (after sort — uses only past rows per user)
+    daily_features = add_velocity_features(daily_features)
+    print(f"Added velocity features: {[c + '_delta' for c in VELOCITY_COLS]}")
+
     daily_features.to_csv(USER_DAILY_OUTPUT, index=False)
 
     merged = daily_features.merge(psychometric_clean, left_on="user", right_on="user_id", how="left")

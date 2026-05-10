@@ -152,6 +152,14 @@ _FLAG_RULES: list[tuple[str, str, float, str]] = [
      "Logging in from an unusual number of workstations"),
     ("content_sensitivity_norm",   ">=", _ga_thresholds["content_sensitivity"],
      "High DLP content sensitivity -- sensitive/restricted data in emails or files"),
+    # Idea 2: burst signal flags
+    ("max_file_exfil_norm",        ">=", 0.60,
+     "Single-day spike in files copied to removable media"),
+    ("max_usb_norm",               ">=", 0.60,
+     "Single-day spike in USB device connections"),
+    # Idea 1: inverted IF flag
+    ("if_inverted_norm",           ">=", 0.60,
+     "User appears unusually normal to Isolation Forest (low-anomaly masking)"),
 ]
 
 
@@ -211,7 +219,8 @@ def compute_behavioral_signals(idf: pd.DataFrame) -> pd.DataFrame:
         usb_connect_count, after_hours_logons, logon_count, unique_logon_pcs,
         employee_name (optional), dataset_split
 
-    Returns one row per user with raw (un-normalised) signal values.
+    Returns one row per user with raw (un-normalised) signal values,
+    including max-based burst signals for single-day spike detection.
     """
     required = [
         "user", "after_hours_ratio", "bcc_ratio",
@@ -224,15 +233,20 @@ def compute_behavioral_signals(idf: pd.DataFrame) -> pd.DataFrame:
         raise ValueError(f"Missing columns in idf: {missing}")
 
     agg = idf.groupby("user").agg(
-        after_hours_rate   = ("after_hours_ratio",  "mean"),
-        bcc_rate           = ("bcc_ratio",           "mean"),
-        total_file_exfil   = ("file_to_removable",   "sum"),
-        total_file_ops     = ("file_total",           "sum"),
-        total_usb          = ("usb_connect_count",    "sum"),
-        total_ah_logons    = ("after_hours_logons",   "sum"),
-        total_logons       = ("logon_count",           "sum"),
-        max_unique_pcs     = ("unique_logon_pcs",      "max"),
-        dataset_split      = ("dataset_split",         lambda x: x.mode().iloc[0]),
+        after_hours_rate      = ("after_hours_ratio",  "mean"),
+        bcc_rate              = ("bcc_ratio",           "mean"),
+        total_file_exfil      = ("file_to_removable",   "sum"),
+        total_file_ops        = ("file_total",           "sum"),
+        total_usb             = ("usb_connect_count",    "sum"),
+        total_ah_logons       = ("after_hours_logons",   "sum"),
+        total_logons          = ("logon_count",           "sum"),
+        max_unique_pcs        = ("unique_logon_pcs",      "max"),
+        # Idea 2: max-based burst signals — capture single-day spikes
+        max_daily_file_exfil  = ("file_to_removable",   "max"),
+        max_daily_usb         = ("usb_connect_count",   "max"),
+        max_after_hours_ratio = ("after_hours_ratio",   "max"),
+        max_bcc_ratio         = ("bcc_ratio",            "max"),
+        dataset_split         = ("dataset_split",         lambda x: x.mode().iloc[0]),
     ).reset_index()
 
     if "employee_name" in idf.columns:
@@ -262,26 +276,37 @@ def compute_risk_scores(
     behavioral_df: pd.DataFrame,
     insider_users: set[str] | None = None,
     sensitivity_df: pd.DataFrame | None = None,
+    if_user_df: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """Combine LSTM p95 score, behavioural signals, and DLP content sensitivity
-    into a final risk score.
+    """Combine LSTM p95 score, behavioural signals, DLP content sensitivity,
+    max-based burst signals, and (optionally) inverted IF score into a risk score.
 
-    lstm_user_df  -- output of compute_user_scores() from user_level_eval.py;
-                     must contain columns: user, score_p95
+    lstm_user_df  -- output of compute_user_scores(); columns: user, score_p95
     behavioral_df -- output of compute_behavioral_signals()
     insider_users -- optional ground-truth set for labelling
-    sensitivity_df-- optional output of load_sensitivity_signals();
-                     when None the content_sensitivity signal is zeroed out
+    sensitivity_df-- optional output of load_sensitivity_signals()
+    if_user_df    -- optional IF user-level scores (columns: user, score_p95);
+                     IF scores insiders LOWER (ROC < 0.5), so the signal is
+                     inverted: if_inverted = 1 - normalised_if_score
 
     Returns a DataFrame with one row per user, sorted by risk_score descending.
     """
+    behav_cols = [
+        "user", "after_hours_rate", "bcc_rate",
+        "file_exfil_rate", "total_usb", "max_unique_pcs", "employee_name",
+        "max_daily_file_exfil", "max_daily_usb",
+    ]
+    avail_behav = [c for c in behav_cols if c in behavioral_df.columns]
+
     df = lstm_user_df[["user", "score_p95", "dataset_split"]].merge(
-        behavioral_df[[
-            "user", "after_hours_rate", "bcc_rate",
-            "file_exfil_rate", "total_usb", "max_unique_pcs", "employee_name",
-        ]],
+        behavioral_df[avail_behav],
         on="user", how="left",
     ).fillna(0)
+
+    # Back-fill max columns if older behavioral_df lacks them
+    for col in ["max_daily_file_exfil", "max_daily_usb"]:
+        if col not in df.columns:
+            df[col] = 0.0
 
     # Optionally merge content sensitivity
     if sensitivity_df is not None and not sensitivity_df.empty:
@@ -292,20 +317,38 @@ def compute_risk_scores(
     else:
         df["content_sensitivity_rate"] = 0.0
 
-    # Normalise each signal independently to [0, 1]
-    df["lstm_p95_norm"]             = _minmax(df["score_p95"])
-    df["after_hours_norm"]          = _minmax(df["after_hours_rate"])
-    df["bcc_usage_norm"]            = _minmax(df["bcc_rate"])
-    df["file_exfil_norm"]           = _minmax(df["file_exfil_rate"])
-    df["usb_activity_norm"]         = _minmax(df["total_usb"])
-    df["multi_pc_norm"]             = _minmax(df["max_unique_pcs"])
-    # content_sensitivity_rate is 0–3; divide by 3 before minmax to keep scale
-    df["content_sensitivity_norm"]  = _minmax(
+    # Idea 1: merge IF scores and compute inverted signal
+    if if_user_df is not None and not if_user_df.empty:
+        if_merge = (
+            if_user_df[["user", "score_p95"]]
+            .rename(columns={"score_p95": "if_score_p95"})
+        )
+        df = df.merge(if_merge, on="user", how="left").fillna({"if_score_p95": 0.0})
+        has_if = True
+    else:
+        df["if_score_p95"] = 0.0
+        has_if = False
+
+    # Normalise existing 7 signals to [0, 1]
+    df["lstm_p95_norm"]            = _minmax(df["score_p95"])
+    df["after_hours_norm"]         = _minmax(df["after_hours_rate"])
+    df["bcc_usage_norm"]           = _minmax(df["bcc_rate"])
+    df["file_exfil_norm"]          = _minmax(df["file_exfil_rate"])
+    df["usb_activity_norm"]        = _minmax(df["total_usb"])
+    df["multi_pc_norm"]            = _minmax(df["max_unique_pcs"])
+    df["content_sensitivity_norm"] = _minmax(
         (df["content_sensitivity_rate"] / 3.0).clip(0, 1)
     )
 
-    # Weighted aggregation (weights sum to 1.0)
-    df["risk_score"] = (
+    # Idea 2: normalise max-based burst signals
+    df["max_file_exfil_norm"] = _minmax(df["max_daily_file_exfil"])
+    df["max_usb_norm"]        = _minmax(df["max_daily_usb"])
+
+    # Idea 1: inverted IF signal (insiders score LOW on IF → invert so they score HIGH)
+    df["if_inverted_norm"] = 1.0 - _minmax(df["if_score_p95"]) if has_if else 0.0
+
+    # Base 7-signal weighted score (GA-optimisable, WEIGHTS unchanged)
+    base_score = (
         WEIGHTS["lstm_p95"]             * df["lstm_p95_norm"]
       + WEIGHTS["after_hours"]          * df["after_hours_norm"]
       + WEIGHTS["bcc_usage"]            * df["bcc_usage_norm"]
@@ -314,6 +357,19 @@ def compute_risk_scores(
       + WEIGHTS["multi_pc"]             * df["multi_pc_norm"]
       + WEIGHTS["content_sensitivity"]  * df["content_sensitivity_norm"]
     )
+
+    # Idea 2: burst supplement — single-day spike score (fixed blend, outside GA)
+    burst_score = 0.5 * df["max_file_exfil_norm"] + 0.5 * df["max_usb_norm"]
+
+    # Final blend: 75% GA-tunable base + 15% burst + 10% IF (when available)
+    if has_if:
+        df["risk_score"] = (
+            0.75 * base_score
+          + 0.15 * burst_score
+          + 0.10 * df["if_inverted_norm"]
+        )
+    else:
+        df["risk_score"] = 0.80 * base_score + 0.20 * burst_score
 
     if insider_users is not None:
         df["is_insider"] = df["user"].isin(insider_users).astype(int)
@@ -338,6 +394,7 @@ def build_investigation_queue(risk_df: pd.DataFrame, top_n: int = 50) -> pd.Data
         "lstm_p95_norm", "after_hours_norm", "bcc_usage_norm",
         "file_exfil_norm", "usb_activity_norm", "multi_pc_norm",
         "content_sensitivity_norm",
+        "max_file_exfil_norm", "max_usb_norm", "if_inverted_norm",
     ]
     for opt in ("is_insider", "explanation"):
         if opt in risk_df.columns:

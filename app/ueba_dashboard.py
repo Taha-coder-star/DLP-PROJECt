@@ -51,13 +51,18 @@ NORMAL_COLOR  = "#4C9BE8"
 
 # Default signal names / colours used across charts (order matches WEIGHTS)
 _SIGNAL_DISPLAY = {
-    "lstm_p95":            ("LSTM P95",          "#5CB85C"),
-    "after_hours":         ("After Hours",        "#4C9BE8"),
-    "bcc_usage":           ("BCC Usage",          "#F4A83A"),
-    "file_exfil":          ("File Exfil",         "#E85454"),
-    "usb_activity":        ("USB Activity",       "#9B59B6"),
-    "multi_pc":            ("Multi PC",           "#95A5A6"),
-    "content_sensitivity": ("Content Sensitivity","#1ABC9C"),
+    "lstm_p95":            ("LSTM P95",            "#5CB85C"),
+    "after_hours":         ("After Hours",          "#4C9BE8"),
+    "bcc_usage":           ("BCC Usage",            "#F4A83A"),
+    "file_exfil":          ("File Exfil",           "#E85454"),
+    "usb_activity":        ("USB Activity",         "#9B59B6"),
+    "multi_pc":            ("Multi PC",             "#95A5A6"),
+    "content_sensitivity": ("Content Sensitivity",  "#1ABC9C"),
+    # Idea 2: burst signals
+    "max_file_exfil":      ("Max File Exfil (day)", "#C0392B"),
+    "max_usb":             ("Max USB (day)",        "#8E44AD"),
+    # Idea 1: inverted IF
+    "if_inverted":         ("IF Inverted",          "#E67E22"),
 }
 
 # ── page config ───────────────────────────────────────────────────────────────
@@ -137,7 +142,8 @@ def load_risk_df(sensitivity_available: bool) -> pd.DataFrame:
     lu    = load_lstm_user_df()
     behav = load_behavioral_df()
     sens  = _load_sensitivity_df() if sensitivity_available else None
-    return compute_risk_scores(lu, behav, iu, sensitivity_df=sens)
+    if_df = load_if_user_df() if IFOREST_CSV.exists() else None
+    return compute_risk_scores(lu, behav, iu, sensitivity_df=sens, if_user_df=if_df)
 
 
 # ── GA / config helpers ───────────────────────────────────────────────────────
@@ -496,22 +502,27 @@ def main() -> None:
     show_cols = ["rank", "user", "employee_name", "risk_score",
                  "lstm_p95_norm", "after_hours_norm", "bcc_usage_norm",
                  "file_exfil_norm", "usb_activity_norm"]
-    if "content_sensitivity_norm" in display_df.columns:
-        show_cols.append("content_sensitivity_norm")
+    for opt in ["content_sensitivity_norm", "max_file_exfil_norm",
+                "max_usb_norm", "if_inverted_norm"]:
+        if opt in display_df.columns:
+            show_cols.append(opt)
     if show_ground_truth and "is_insider" in display_df.columns:
         show_cols.append("is_insider")
     display_df = display_df.sort_values("risk_score", ascending=False)
 
     col_rename = {
         "rank": "Rank", "user": "User ID", "employee_name": "Name",
-        "risk_score": score_label,
-        "lstm_p95_norm": "LSTM P95",
-        "after_hours_norm": "After Hours",
-        "bcc_usage_norm": "BCC Usage",
-        "file_exfil_norm": "File Exfil",
-        "usb_activity_norm": "USB Activity",
-        "content_sensitivity_norm": "Content Sensitivity",
-        "is_insider": "Insider?",
+        "risk_score":              score_label,
+        "lstm_p95_norm":           "LSTM P95",
+        "after_hours_norm":        "After Hours",
+        "bcc_usage_norm":          "BCC Usage",
+        "file_exfil_norm":         "File Exfil",
+        "usb_activity_norm":       "USB Activity",
+        "content_sensitivity_norm":"Content Sensitivity",
+        "max_file_exfil_norm":     "Max Exfil (day)",
+        "max_usb_norm":            "Max USB (day)",
+        "if_inverted_norm":        "IF Inverted",
+        "is_insider":              "Insider?",
     }
     fmt = {
         score_label:          "{:.4f}",
@@ -521,6 +532,9 @@ def main() -> None:
         "File Exfil":         "{:.3f}",
         "USB Activity":       "{:.3f}",
         "Content Sensitivity":"{:.3f}",
+        "Max Exfil (day)":    "{:.3f}",
+        "Max USB (day)":      "{:.3f}",
+        "IF Inverted":        "{:.3f}",
     }
     st.dataframe(
         display_df[show_cols].rename(columns=col_rename)
@@ -578,25 +592,22 @@ def main() -> None:
         for flag in flags:
             st.markdown(f"- {flag}")
 
-        # Signal breakdown bar — all 7 signals
+        # Signal breakdown bar — all signals
+        _SIGNAL_COL_MAP = {
+            "lstm_p95":            "lstm_p95_norm",
+            "after_hours":         "after_hours_norm",
+            "bcc_usage":           "bcc_usage_norm",
+            "file_exfil":          "file_exfil_norm",
+            "usb_activity":        "usb_activity_norm",
+            "multi_pc":            "multi_pc_norm",
+            "content_sensitivity": "content_sensitivity_norm",
+            "max_file_exfil":      "max_file_exfil_norm",
+            "max_usb":             "max_usb_norm",
+            "if_inverted":         "if_inverted_norm",
+        }
         signals: dict[str, float] = {}
         for key, (label, _) in _SIGNAL_DISPLAY.items():
-            col_name = f"{key}_norm" if key != "lstm_p95" else "lstm_p95_norm"
-            # handle the naming convention used in risk_scorer
-            if key == "lstm_p95":
-                col_name = "lstm_p95_norm"
-            elif key == "after_hours":
-                col_name = "after_hours_norm"
-            elif key == "bcc_usage":
-                col_name = "bcc_usage_norm"
-            elif key == "file_exfil":
-                col_name = "file_exfil_norm"
-            elif key == "usb_activity":
-                col_name = "usb_activity_norm"
-            elif key == "multi_pc":
-                col_name = "multi_pc_norm"
-            elif key == "content_sensitivity":
-                col_name = "content_sensitivity_norm"
+            col_name = _SIGNAL_COL_MAP.get(key, f"{key}_norm")
             if col_name in row.index:
                 signals[label] = float(row[col_name])
 
@@ -604,13 +615,16 @@ def main() -> None:
         from risk_scorer import _FLAG_RULES  # noqa: E402
         col_to_thresh = {rule[0]: rule[2] for rule in _FLAG_RULES}
         norm_col_map = {
-            "LSTM P95":            "lstm_p95_norm",
-            "After Hours":         "after_hours_norm",
-            "BCC Usage":           "bcc_usage_norm",
-            "File Exfil":          "file_exfil_norm",
-            "USB Activity":        "usb_activity_norm",
-            "Multi PC":            "multi_pc_norm",
-            "Content Sensitivity": "content_sensitivity_norm",
+            "LSTM P95":             "lstm_p95_norm",
+            "After Hours":          "after_hours_norm",
+            "BCC Usage":            "bcc_usage_norm",
+            "File Exfil":           "file_exfil_norm",
+            "USB Activity":         "usb_activity_norm",
+            "Multi PC":             "multi_pc_norm",
+            "Content Sensitivity":  "content_sensitivity_norm",
+            "Max File Exfil (day)": "max_file_exfil_norm",
+            "Max USB (day)":        "max_usb_norm",
+            "IF Inverted":          "if_inverted_norm",
         }
         sig_df = pd.DataFrame({"Signal": list(signals.keys()),
                                "Value":  list(signals.values())})
@@ -703,7 +717,7 @@ This system implements a *multi-signal evidence aggregation* algorithm:
             f"(baseline {bm.get('f1', 0):.4f}, Δ{im.get('delta_f1', 0):+.4f})  "
             f"| **{m.get('tp', 0)} / {len(insider_users)} insiders detected**  \n\n"
             f"At K=20, Precision rises to **0.50** — half of the flagged users are real insiders.  \n"
-            "Isolation Forest is not recommended: it scores insiders *lower* than normal users (ROC AUC < 0.5)."
+            "IF is used in **inverted** form: low IF score = insider-like masking behavior."
         )
     else:
         st.success(
@@ -713,7 +727,7 @@ This system implements a *multi-signal evidence aggregation* algorithm:
             f"→ Precision/Recall/F1 depend on the auto-selected CERT release; "
             f"currently tracking **{len(insider_users)} matching insider users**.  \n\n"
             "At K=20, Precision rises to **0.50** — half of the flagged users are real insiders.  \n"
-            "Isolation Forest is not recommended: it scores insiders *lower* than normal users (ROC AUC < 0.5)."
+            "IF is used in **inverted** form: low IF score = insider-like masking behavior."
         )
 
 

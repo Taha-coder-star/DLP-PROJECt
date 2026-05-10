@@ -276,6 +276,71 @@ def print_summary(records: list[dict], n_insiders: int) -> None:
 
 
 # =============================================================================
+# Idea 3 -- OR ensemble evaluation
+# =============================================================================
+
+def evaluate_or_ensemble(
+    lstm_user_df: pd.DataFrame,
+    if_user_df: pd.DataFrame,
+    insider_users: set[str],
+    k: int,
+    lstm_agg: str = "score_p95",
+) -> dict:
+    """OR ensemble: flag users in top-K by LSTM OR bottom-K by IF score.
+
+    Isolation Forest scores insiders LOWER than normals (ROC AUC < 0.5).
+    Taking the bottom-K users by IF score (the ones IF considers most normal)
+    is therefore equivalent to an inverted IF ranking.
+    Union with LSTM top-K catches insiders that either model surfaces.
+    """
+    top_lstm  = set(lstm_user_df.nlargest(k, lstm_agg)["user"])
+    bot_if    = set(if_user_df.nsmallest(k, lstm_agg)["user"])   # inverted IF
+    union     = top_lstm | bot_if
+    tp        = len(union & insider_users)
+    fp        = len(union) - tp
+    fn        = len(insider_users) - tp
+    prec      = tp / len(union)  if union          else 0.0
+    recall    = tp / len(insider_users) if insider_users else 0.0
+    f1        = 2 * prec * recall / (prec + recall) if (prec + recall) > 0 else 0.0
+    return {
+        "k":          k,
+        "lstm_pool":  len(top_lstm),
+        "if_pool":    len(bot_if),
+        "union_size": len(union),
+        "tp": tp, "fp": fp, "fn": fn,
+        "precision": prec, "recall": recall, "f1": f1,
+    }
+
+
+def print_ensemble_table(
+    lstm_user_df: pd.DataFrame,
+    if_user_df: pd.DataFrame,
+    insider_users: set[str],
+    k_values: list[int] | None = None,
+) -> None:
+    """Print OR ensemble results across multiple K values."""
+    if k_values is None:
+        k_values = [10, 20, 50]
+    w = 72
+    print("\n" + "=" * w)
+    print("  Idea 3 — OR Ensemble (LSTM top-K  ∪  IF bottom-K)")
+    print("  IF is inverted: bottom-K by IF score = most insider-like")
+    print("=" * w)
+    print(f"  {'K':>5}  {'LSTM':>6}  {'IF':>6}  {'Union':>6}"
+          f"  {'TP':>4}  {'FP':>5}  {'FN':>4}"
+          f"  {'Prec':>8}  {'Recall':>8}  {'F1':>8}")
+    print("  " + "-" * (w - 2))
+    for k in k_values:
+        m = evaluate_or_ensemble(lstm_user_df, if_user_df, insider_users, k)
+        print(
+            f"  {k:>5}  {m['lstm_pool']:>6}  {m['if_pool']:>6}  {m['union_size']:>6}"
+            f"  {m['tp']:>4}  {m['fp']:>5}  {m['fn']:>4}"
+            f"  {m['precision']:>8.4f}  {m['recall']:>8.4f}  {m['f1']:>8.4f}"
+        )
+    print("=" * w + "\n")
+
+
+# =============================================================================
 # Main
 # =============================================================================
 
@@ -312,6 +377,18 @@ def main() -> None:
     if all_records:
         print_agg_comparison(all_records)  # Step 8
         print_summary(all_records, len(insider_users))  # Step 10
+
+    # Idea 3: OR ensemble
+    if IFOREST_CSV.exists() and LSTM_CSV.exists():
+        ldf_e = pd.read_csv(LSTM_CSV,
+                            usecols=["user", "lstm_score",
+                                     "lstm_risk_severity", "dataset_split"])
+        ldf_e = ldf_e[ldf_e["lstm_risk_severity"] != "undetermined"]
+        idf_e = pd.read_csv(IFOREST_CSV,
+                            usecols=["user", "iforest_score", "dataset_split"])
+        lstm_u = compute_user_scores(ldf_e, "lstm_score",    insider_users)
+        if_u   = compute_user_scores(idf_e, "iforest_score", insider_users)
+        print_ensemble_table(lstm_u, if_u, insider_users)
 
 
 if __name__ == "__main__":

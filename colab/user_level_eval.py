@@ -36,8 +36,9 @@ sys.path.insert(0, str(REPO_DIR))
 from config import CLEANED_DIR  # noqa: E402
 from ground_truth import describe_selection, select_ground_truth_release  # noqa: E402
 
-IFOREST_CSV  = CLEANED_DIR / "email_user_daily_scored.csv"
-LSTM_CSV     = CLEANED_DIR / "email_user_daily_lstm_scored.csv"
+IFOREST_CSV     = CLEANED_DIR / "email_user_daily_scored.csv"
+LSTM_CSV        = CLEANED_DIR / "email_user_daily_lstm_scored.csv"
+META_SCORES_CSV = CLEANED_DIR / "user_meta_scores.csv"
 
 THRESHOLDS = [90, 95, 97]
 K_VALUES   = [10, 20, 50]
@@ -60,6 +61,14 @@ def compute_user_scores(
     dataset_split is the majority split for the user (used to identify
     train users for threshold calibration without leaking test behaviour).
     """
+    extra_agg: dict = {}
+    if "latent_distance" in df.columns:
+        extra_agg["latent_dist_p95"] = (
+            "latent_distance",
+            lambda x: float(np.percentile(x.dropna(), 95)) if x.dropna().size else 0.0,
+        )
+        extra_agg["latent_dist_max"] = ("latent_distance", "max")
+
     agg = df.groupby("user").agg(
         score_max      = (score_col, "max"),
         score_mean     = (score_col, "mean"),
@@ -68,6 +77,7 @@ def compute_user_scores(
         score_flag_rate= (score_col, lambda x: float((x.dropna() >= 0.5).mean())
                                                if x.dropna().size else 0.0),
         dataset_split  = ("dataset_split", lambda x: x.mode().iloc[0]),
+        **extra_agg,
     ).reset_index()
     agg["is_insider"] = agg["user"].isin(insider_users).astype(int)
     return agg
@@ -366,9 +376,11 @@ def main() -> None:
 
     # Step 7: LSTM Autoencoder
     if LSTM_CSV.exists():
-        ldf = pd.read_csv(LSTM_CSV,
-                          usecols=["user", "lstm_score",
-                                   "lstm_risk_severity", "dataset_split"])
+        _lstm_cols = ["user", "lstm_score", "lstm_risk_severity", "dataset_split"]
+        _avail = pd.read_csv(LSTM_CSV, nrows=0).columns.tolist()
+        if "latent_distance" in _avail:
+            _lstm_cols.append("latent_distance")
+        ldf = pd.read_csv(LSTM_CSV, usecols=_lstm_cols)
         ldf = ldf[ldf["lstm_risk_severity"] != "undetermined"]
         all_records += analyse_model(
             ldf, "lstm_score", insider_users, "LSTM Autoencoder"
@@ -382,15 +394,43 @@ def main() -> None:
 
     # Idea 3: OR ensemble
     if IFOREST_CSV.exists() and LSTM_CSV.exists():
-        ldf_e = pd.read_csv(LSTM_CSV,
-                            usecols=["user", "lstm_score",
-                                     "lstm_risk_severity", "dataset_split"])
+        _e_cols = ["user", "lstm_score", "lstm_risk_severity", "dataset_split"]
+        _e_avail = pd.read_csv(LSTM_CSV, nrows=0).columns.tolist()
+        if "latent_distance" in _e_avail:
+            _e_cols.append("latent_distance")
+        ldf_e = pd.read_csv(LSTM_CSV, usecols=_e_cols)
         ldf_e = ldf_e[ldf_e["lstm_risk_severity"] != "undetermined"]
         idf_e = pd.read_csv(IFOREST_CSV,
                             usecols=["user", "iforest_score", "dataset_split"])
         lstm_u = compute_user_scores(ldf_e, "lstm_score",    insider_users)
         if_u   = compute_user_scores(idf_e, "iforest_score", insider_users)
         print_ensemble_table(lstm_u, if_u, insider_users)
+
+    # Idea 13: meta-model evaluation (if meta_model.py has already run)
+    if META_SCORES_CSV.exists():
+        meta_df = pd.read_csv(META_SCORES_CSV)
+        meta_df["user"] = meta_df["user"].astype(str)
+        n_ins = len(insider_users)
+        w = 65
+        print("\n" + "=" * w)
+        print("  Phase 4 Idea 13 — Meta-model top-K evaluation")
+        print("=" * w)
+        print(f"  {'K':>5}  {'Precision':>10}  {'Recall':>8}  {'F1':>8}"
+              f"  {'TP':>4}  {'FP':>5}  {'FN':>4}")
+        print("  " + "-" * (w - 2))
+        for k in K_VALUES:
+            actual_k = min(k, len(meta_df))
+            top_k = set(meta_df.nlargest(actual_k, "meta_score")["user"])
+            tp = len(top_k & insider_users)
+            fp = actual_k - tp
+            fn = n_ins - tp
+            prec   = tp / actual_k if actual_k else 0.0
+            recall = tp / n_ins    if n_ins    else 0.0
+            f1     = 2*prec*recall/(prec+recall) if (prec+recall) > 0 else 0.0
+            star = "*" if actual_k < k else ""
+            print(f"  {k}{star:<1}  {prec:>10.4f}  {recall:>8.4f}"
+                  f"  {f1:>8.4f}  {tp:>4}  {fp:>5}  {fn:>4}")
+        print("=" * w + "\n")
 
 
 if __name__ == "__main__":

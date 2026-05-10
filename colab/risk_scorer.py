@@ -163,6 +163,9 @@ _FLAG_RULES: list[tuple[str, str, float, str]] = [
     # Idea 6: persistent anomaly flag
     ("flagged_day_norm",           ">=", 0.60,
      "Elevated LSTM anomaly on many days — persistent, not just single-day spike"),
+    # Idea 12: latent distance flag
+    ("latent_dist_norm",           ">=", 0.60,
+     "LSTM latent vector far from user's normal training-period centroid"),
 ]
 
 
@@ -301,8 +304,9 @@ def compute_risk_scores(
     ]
     avail_behav = [c for c in behav_cols if c in behavioral_df.columns]
 
-    # Idea 5 & 6: pull score_max and score_flag_rate if the caller provided them
-    lstm_extra = [c for c in ["score_max", "score_flag_rate"]
+    # Idea 5, 6, 12: pull optional per-user aggregated LSTM columns if available
+    lstm_extra = [c for c in ["score_max", "score_flag_rate",
+                               "latent_dist_p95", "latent_dist_max"]
                   if c in lstm_user_df.columns]
     df = lstm_user_df[["user", "score_p95", "dataset_split"] + lstm_extra].merge(
         behavioral_df[avail_behav],
@@ -310,7 +314,8 @@ def compute_risk_scores(
     ).fillna(0)
 
     # Back-fill optional columns if caller didn't supply them
-    for col in ["max_daily_file_exfil", "max_daily_usb", "score_max", "score_flag_rate"]:
+    for col in ["max_daily_file_exfil", "max_daily_usb", "score_max",
+                "score_flag_rate", "latent_dist_p95", "latent_dist_max"]:
         if col not in df.columns:
             df[col] = 0.0
 
@@ -357,6 +362,9 @@ def compute_risk_scores(
     # Idea 6: fraction of days with elevated LSTM score (persistent vs one-off)
     df["flagged_day_norm"] = _minmax(df["score_flag_rate"])
 
+    # Idea 12: latent distance from per-user normal centroid
+    df["latent_dist_norm"] = _minmax(df["latent_dist_p95"])
+
     # Idea 1: inverted IF signal (insiders score LOW on IF → invert so they score HIGH)
     df["if_inverted_norm"] = 1.0 - _minmax(df["if_score_p95"]) if has_if else 0.0
 
@@ -374,9 +382,10 @@ def compute_risk_scores(
 
     # Idea 2+6: burst/persistence supplement (fixed blend, outside GA)
     burst_score = (
-        0.35 * df["max_file_exfil_norm"]
-      + 0.35 * df["max_usb_norm"]
-      + 0.30 * df["flagged_day_norm"]
+        0.30 * df["max_file_exfil_norm"]
+      + 0.30 * df["max_usb_norm"]
+      + 0.20 * df["flagged_day_norm"]
+      + 0.20 * df["latent_dist_norm"]
     )
 
     # Final blend: 75% GA-tunable base + 15% burst + 10% IF (when available)
@@ -413,7 +422,7 @@ def build_investigation_queue(risk_df: pd.DataFrame, top_n: int = 50) -> pd.Data
         "file_exfil_norm", "usb_activity_norm", "multi_pc_norm",
         "content_sensitivity_norm",
         "max_file_exfil_norm", "max_usb_norm", "if_inverted_norm",
-        "flagged_day_norm",
+        "flagged_day_norm", "latent_dist_norm",
     ]
     for opt in ("is_insider", "explanation"):
         if opt in risk_df.columns:

@@ -43,8 +43,10 @@ from ground_truth import describe_selection, find_insiders_csv, select_ground_tr
 IFOREST_CSV        = CLEANED_DIR / "email_user_daily_scored.csv"
 LSTM_CSV           = CLEANED_DIR / "email_user_daily_lstm_scored.csv"
 SENSITIVITY_CSV    = CLEANED_DIR / "content_sensitivity_daily.csv"
+META_SCORES_CSV    = CLEANED_DIR / "user_meta_scores.csv"
 GA_CONFIG_JSON     = MODELS_DIR / "ga_optimized_config.json"
 GA_REPORT_JSON     = MODELS_DIR / "ga_optimization_report.json"
+META_REPORT_JSON   = MODELS_DIR / "meta_model_report.json"
 
 INSIDER_COLOR = "#E85454"
 NORMAL_COLOR  = "#4C9BE8"
@@ -65,6 +67,10 @@ _SIGNAL_DISPLAY = {
     "if_inverted":         ("IF Inverted",          "#E67E22"),
     # Idea 6: persistent anomaly rate
     "flagged_day_rate":    ("Flagged Day Rate",     "#F39C12"),
+    # Idea 12: latent distance
+    "latent_dist":         ("Latent Distance",      "#9B59B6"),
+    # Phase 4: meta-model composite score
+    "meta_score":          ("Meta Score",           "#2ECC71"),
 }
 
 # ── page config ───────────────────────────────────────────────────────────────
@@ -105,11 +111,21 @@ def ground_truth_available() -> bool:
 
 @st.cache_data
 def load_lstm_user_df() -> pd.DataFrame:
-    ldf = pd.read_csv(LSTM_CSV,
-                      usecols=["user", "lstm_score", "lstm_risk_severity", "dataset_split"])
+    _cols = ["user", "lstm_score", "lstm_risk_severity", "dataset_split"]
+    _avail = pd.read_csv(LSTM_CSV, nrows=0).columns.tolist()
+    if "latent_distance" in _avail:
+        _cols.append("latent_distance")
+    ldf = pd.read_csv(LSTM_CSV, usecols=_cols)
     ldf = ldf[ldf["lstm_risk_severity"] != "undetermined"]
     iu  = load_insider_users()
     return compute_user_scores(ldf, "lstm_score", iu)
+
+
+@st.cache_data
+def load_meta_scores() -> pd.DataFrame | None:
+    if not META_SCORES_CSV.exists():
+        return None
+    return pd.read_csv(META_SCORES_CSV, usecols=["user", "meta_score"])
 
 
 @st.cache_data
@@ -376,6 +392,85 @@ def render_ga_summary():
             )
 
 
+# ── meta-model summary section ───────────────────────────────────────────────
+
+def render_meta_summary() -> None:
+    meta_report = _load_json_safe(META_REPORT_JSON)
+    meta_available = META_SCORES_CSV.exists()
+
+    with st.expander("🧠 Phase 4 — Meta-Model & Voting Ensemble", expanded=meta_available):
+        if not meta_available:
+            st.info(
+                "Meta-model not yet run.  \n"
+                "Run `python colab/meta_model.py` (or include it in the full pipeline) "
+                "to generate `user_meta_scores.csv` and enable this section."
+            )
+            return
+
+        st.markdown("**Status:** ✅ Meta-model scores loaded (`user_meta_scores.csv`)")
+
+        if meta_report:
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("CV ROC-AUC",    f"{meta_report.get('cv_roc_auc', 0):.4f}")
+            c2.metric("CV Avg Prec",   f"{meta_report.get('cv_avg_precision', 0):.4f}")
+            c3.metric("Train users",   meta_report.get("n_train_users", "—"))
+            c4.metric("Insiders labelled", meta_report.get("n_insiders", "—"))
+
+            # Top-K tables side by side
+            col_l, col_r = st.columns(2)
+
+            with col_l:
+                st.markdown("**Idea 13 — Meta-model top-K:**")
+                meta_topk = meta_report.get("meta_topk", [])
+                if meta_topk:
+                    st.dataframe(
+                        pd.DataFrame(meta_topk)[["k", "precision", "recall", "f1", "tp", "fp", "fn"]]
+                          .rename(columns={"k": "K", "precision": "Prec",
+                                           "recall": "Recall", "f1": "F1",
+                                           "tp": "TP", "fp": "FP", "fn": "FN"})
+                          .set_index("K")
+                          .style.format({"Prec": "{:.4f}", "Recall": "{:.4f}", "F1": "{:.4f}"}),
+                        use_container_width=True,
+                    )
+
+            with col_r:
+                st.markdown("**Idea 14 — 3-way majority voting top-K:**")
+                voting_topk = meta_report.get("voting_topk", [])
+                if voting_topk:
+                    st.dataframe(
+                        pd.DataFrame(voting_topk)[["k", "flagged", "precision", "recall", "f1", "tp", "fp", "fn"]]
+                          .rename(columns={"k": "K", "flagged": "Flagged",
+                                           "precision": "Prec", "recall": "Recall",
+                                           "f1": "F1", "tp": "TP", "fp": "FP", "fn": "FN"})
+                          .set_index("K")
+                          .style.format({"Prec": "{:.4f}", "Recall": "{:.4f}", "F1": "{:.4f}"}),
+                        use_container_width=True,
+                    )
+
+            # LR coefficient bar chart
+            lr_coef = meta_report.get("lr_coef", {})
+            if lr_coef:
+                st.markdown("**Meta-model signal weights (LR coefficients):**")
+                coef_df = (
+                    pd.DataFrame(list(lr_coef.items()), columns=["Signal", "Coef"])
+                      .sort_values("Coef", key=abs, ascending=False)
+                )
+                bar_cols = ["#E85454" if v > 0 else "#4C9BE8"
+                            for v in coef_df["Coef"]]
+                fig, ax = plt.subplots(figsize=(6, max(2.5, len(coef_df) * 0.35)))
+                ax.barh(coef_df["Signal"][::-1], coef_df["Coef"][::-1],
+                        color=bar_cols[::-1], alpha=0.85)
+                ax.axvline(0, color="gray", linewidth=0.8)
+                ax.set_xlabel("Logistic Regression Coefficient")
+                ax.set_title("Meta-model signal importances (↑ = insider indicator)")
+                ax.grid(axis="x", alpha=0.3)
+                fig.tight_layout()
+                st.pyplot(fig)
+                plt.close(fig)
+        else:
+            st.info("Run `python colab/meta_model.py` to generate the detailed meta-model report.")
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # Dashboard layout
 # ═════════════════════════════════════════════════════════════════════════════
@@ -456,12 +551,16 @@ def main() -> None:
         lstm_user_df  = load_lstm_user_df()
         if_user_df    = load_if_user_df()
         risk_df       = load_risk_df(sensitivity_available)
+        meta_df       = load_meta_scores()
+        if meta_df is not None:
+            risk_df = risk_df.merge(meta_df, on="user", how="left")
 
     user_df   = lstm_user_df if model_choice == "LSTM Autoencoder" else if_user_df
     score_col = agg_choice
 
     # ── GA summary (always rendered, expanded when GA is active) ─────────────
     render_ga_summary()
+    render_meta_summary()
 
     if not run_btn and "ran" not in st.session_state:
         st.info("Configure settings in the sidebar and click **Run Analysis**.")
@@ -505,7 +604,8 @@ def main() -> None:
                  "lstm_p95_norm", "after_hours_norm", "bcc_usage_norm",
                  "file_exfil_norm", "usb_activity_norm"]
     for opt in ["content_sensitivity_norm", "max_file_exfil_norm",
-                "max_usb_norm", "if_inverted_norm", "flagged_day_norm"]:
+                "max_usb_norm", "if_inverted_norm", "flagged_day_norm",
+                "latent_dist_norm", "meta_score"]:
         if opt in display_df.columns:
             show_cols.append(opt)
     if show_ground_truth and "is_insider" in display_df.columns:
@@ -525,6 +625,8 @@ def main() -> None:
         "max_usb_norm":            "Max USB (day)",
         "if_inverted_norm":        "IF Inverted",
         "flagged_day_norm":        "Flagged Day Rate",
+        "latent_dist_norm":        "Latent Distance",
+        "meta_score":              "Meta Score",
         "is_insider":              "Insider?",
     }
     fmt = {
@@ -539,6 +641,8 @@ def main() -> None:
         "Max USB (day)":      "{:.3f}",
         "IF Inverted":        "{:.3f}",
         "Flagged Day Rate":   "{:.3f}",
+        "Latent Distance":    "{:.3f}",
+        "Meta Score":         "{:.4f}",
     }
     st.dataframe(
         display_df[show_cols].rename(columns=col_rename)
@@ -609,6 +713,8 @@ def main() -> None:
             "max_usb":             "max_usb_norm",
             "if_inverted":         "if_inverted_norm",
             "flagged_day_rate":    "flagged_day_norm",
+            "latent_dist":         "latent_dist_norm",
+            "meta_score":          "meta_score",
         }
         signals: dict[str, float] = {}
         for key, (label, _) in _SIGNAL_DISPLAY.items():
@@ -631,6 +737,8 @@ def main() -> None:
             "Max USB (day)":        "max_usb_norm",
             "IF Inverted":          "if_inverted_norm",
             "Flagged Day Rate":     "flagged_day_norm",
+            "Latent Distance":      "latent_dist_norm",
+            "Meta Score":           "meta_score",
         }
         sig_df = pd.DataFrame({"Signal": list(signals.keys()),
                                "Value":  list(signals.values())})

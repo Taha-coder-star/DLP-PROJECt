@@ -169,6 +169,9 @@ def run_pipeline(args: argparse.Namespace) -> None:
             cmd.append("--quick")
         run(cmd)
 
+    if not args.skip_meta:
+        run([sys.executable, str(REPO_DIR / "colab" / "meta_model.py")])
+
     if not args.skip_eval:
         run([sys.executable, str(REPO_DIR / "colab" / "evaluate_cert.py")])
         run([sys.executable, str(REPO_DIR / "colab" / "user_level_eval.py")])
@@ -247,6 +250,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-lstm", action="store_true", help="Skip LSTM training and plots.")
     parser.add_argument("--skip-sensitivity", action="store_true", help="Skip DLP content sensitivity scoring.")
     parser.add_argument("--skip-ga", action="store_true", help="Skip GA optimisation.")
+    parser.add_argument("--skip-meta", action="store_true", help="Skip Phase 4 meta-model and 3-way voting ensemble.")
     parser.add_argument("--skip-eval", action="store_true", help="Skip evaluation and user-level plots.")
     return parser.parse_args()
 

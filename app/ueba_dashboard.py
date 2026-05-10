@@ -73,6 +73,39 @@ _SIGNAL_DISPLAY = {
     "meta_score":          ("Meta Score",           "#2ECC71"),
 }
 
+# Signal → risk_df column mapping (module-level constant, never changes)
+# meta_score is excluded: it is shown as a dedicated tile, not a signal bar
+_SIGNAL_COL_MAP = {
+    "lstm_p95":            "lstm_p95_norm",
+    "after_hours":         "after_hours_norm",
+    "bcc_usage":           "bcc_usage_norm",
+    "file_exfil":          "file_exfil_norm",
+    "usb_activity":        "usb_activity_norm",
+    "multi_pc":            "multi_pc_norm",
+    "content_sensitivity": "content_sensitivity_norm",
+    "max_file_exfil":      "max_file_exfil_norm",
+    "max_usb":             "max_usb_norm",
+    "if_inverted":         "if_inverted_norm",
+    "flagged_day_rate":    "flagged_day_norm",
+    "latent_dist":         "latent_dist_norm",
+}
+
+# Display label → risk_df column (used for per-signal threshold lookup)
+_NORM_COL_MAP = {
+    "LSTM P95":             "lstm_p95_norm",
+    "After Hours":          "after_hours_norm",
+    "BCC Usage":            "bcc_usage_norm",
+    "File Exfil":           "file_exfil_norm",
+    "USB Activity":         "usb_activity_norm",
+    "Multi PC":             "multi_pc_norm",
+    "Content Sensitivity":  "content_sensitivity_norm",
+    "Max File Exfil (day)": "max_file_exfil_norm",
+    "Max USB (day)":        "max_usb_norm",
+    "IF Inverted":          "if_inverted_norm",
+    "Flagged Day Rate":     "flagged_day_norm",
+    "Latent Distance":      "latent_dist_norm",
+}
+
 # ── page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="UEBA — Insider Threat Detection",
@@ -164,6 +197,16 @@ def load_risk_df(sensitivity_available: bool) -> pd.DataFrame:
     return compute_risk_scores(lu, behav, iu, sensitivity_df=sens, if_user_df=if_df)
 
 
+@st.cache_data
+def load_risk_df_with_meta(sensitivity_available: bool) -> pd.DataFrame:
+    """Risk scores + meta_score merged in one cached DataFrame."""
+    rdf  = load_risk_df(sensitivity_available)
+    meta = load_meta_scores()
+    if meta is not None:
+        rdf = rdf.merge(meta, on="user", how="left")
+    return rdf
+
+
 # ── GA / config helpers ───────────────────────────────────────────────────────
 
 def _load_json_safe(path: Path) -> dict | None:
@@ -180,9 +223,9 @@ def _ga_score_label() -> str:
 # ── chart helpers ─────────────────────────────────────────────────────────────
 
 def fig_prf1_vs_k(user_df, agg, thresh_pct, insider_users, k_values):
+    filtered, _ = apply_user_threshold(user_df, agg, thresh_pct)  # compute once
     rows = []
     for k in k_values:
-        filtered, _ = apply_user_threshold(user_df, agg, thresh_pct)
         m = evaluate_topk_users(filtered, insider_users, k)
         rows.append({"K": k, "Precision": m["precision"],
                      "Recall": m["recall"], "F1": m["f1"]})
@@ -223,18 +266,24 @@ def fig_score_distribution(user_df, insider_users):
     return fig
 
 
-def fig_top_users_bar(risk_df, insider_users, top_n=20, score_label="Risk Score"):
-    top = risk_df.head(top_n).copy()
+def fig_top_users_bar(risk_df, insider_users, top_n=20,
+                      score_label="Risk Score", score_col="risk_score"):
+    top = (
+        risk_df.dropna(subset=[score_col])
+               .sort_values(score_col, ascending=False)
+               .head(top_n)
+               .copy()
+    )
     top["label"] = top["user"].apply(
         lambda u: f"★ {u}" if u in insider_users else u
     )
     colors = [INSIDER_COLOR if u in insider_users else NORMAL_COLOR
               for u in top["user"]]
     fig, ax = plt.subplots(figsize=(7, max(4, top_n * 0.28)))
-    ax.barh(top["label"][::-1], top["risk_score"][::-1],
+    ax.barh(top["label"][::-1], top[score_col][::-1],
             color=colors[::-1], alpha=0.85)
     ax.set_xlabel(score_label)
-    ax.set_title(f"Top {top_n} Suspicious Users")
+    ax.set_title(f"Top {top_n} Suspicious Users — ranked by {score_label}")
     ins_patch = mpatches.Patch(color=INSIDER_COLOR, label="Confirmed insider (★)")
     nor_patch  = mpatches.Patch(color=NORMAL_COLOR,  label="Normal user")
     ax.legend(handles=[ins_patch, nor_patch], fontsize=8)
@@ -244,10 +293,10 @@ def fig_top_users_bar(risk_df, insider_users, top_n=20, score_label="Risk Score"
 
 
 def fig_tp_fp_fn(user_df, agg, thresh_pct, insider_users):
+    filtered, _ = apply_user_threshold(user_df, agg, thresh_pct)  # compute once
     k_vals = [10, 20, 50, 100]
     tps, fps, fns = [], [], []
     for k in k_vals:
-        filtered, _ = apply_user_threshold(user_df, agg, thresh_pct)
         m = evaluate_topk_users(filtered, insider_users, k)
         tps.append(m["tp"]); fps.append(m["fp"]); fns.append(m["fn"])
     x = np.arange(len(k_vals))
@@ -478,16 +527,17 @@ def render_meta_summary() -> None:
 def main() -> None:
 
     # ── Header ───────────────────────────────────────────────────────────────
-    title_suffix = " · GA-Optimized" if _GA_LOADED else ""
+    meta_available = META_SCORES_CSV.exists()
+    title_suffix   = " · GA-Optimized" if _GA_LOADED else ""
     st.title(f"🔒 UEBA — Insider Threat Detection System{title_suffix}")
     gt_description = load_ground_truth_description()
     st.markdown(
-        "**User and Entity Behaviour Analytics** pipeline built on the CERT "
-        "insider threat dataset. The dashboard auto-selects the answer-key release "
-        "that matches the scored users. Detects suspicious users using an LSTM Autoencoder "
-        "combined with a weighted behavioural risk scoring algorithm"
-        + (" with **Genetic Algorithm-optimised weights**." if _GA_LOADED
-           else " with domain-knowledge weights.")
+        "**User and Entity Behaviour Analytics** pipeline built on the CERT insider "
+        "threat dataset. Uses an LSTM Autoencoder + Isolation Forest across 13 "
+        "normalised signals, combined by a "
+        + ("**supervised meta-model ensemble** (Phase 4 — final system)."
+           if meta_available
+           else "weighted risk score. Run `colab/meta_model.py` to activate the Phase 4 final system.")
     )
     st.caption(gt_description)
     st.markdown("---")
@@ -512,7 +562,9 @@ def main() -> None:
         st.sidebar.info("⚪ Domain-default weights")
 
     model_choice = st.sidebar.selectbox(
-        "Model", ["LSTM Autoencoder", "Isolation Forest"]
+        "Standalone Model", ["LSTM Autoencoder", "Isolation Forest"],
+        help="Selects which anomaly detector drives the standalone metrics row "
+             "in Section 1. The meta-model ensemble is always shown separately.",
     )
     agg_choice = st.sidebar.selectbox(
         "Score Aggregation",
@@ -539,7 +591,8 @@ def main() -> None:
 
     st.sidebar.markdown("---")
     st.sidebar.markdown(
-        f"**{'GA-Optimized ' if _GA_LOADED else ''}Weight breakdown:**"
+        f"**{'GA-Optimized ' if _GA_LOADED else ''}Risk Score Weights**  \n"
+        "*intermediate signal — meta-model is the final system*"
     )
     for k, v in WEIGHTS.items():
         label = _SIGNAL_DISPLAY.get(k, (k.replace("_", " ").title(), ""))[0]
@@ -550,55 +603,104 @@ def main() -> None:
         insider_users = load_insider_users() if show_ground_truth else set()
         lstm_user_df  = load_lstm_user_df()
         if_user_df    = load_if_user_df()
-        risk_df       = load_risk_df(sensitivity_available)
-        meta_df       = load_meta_scores()
-        if meta_df is not None:
-            risk_df = risk_df.merge(meta_df, on="user", how="left")
+        risk_df       = load_risk_df_with_meta(sensitivity_available)
 
     user_df   = lstm_user_df if model_choice == "LSTM Autoencoder" else if_user_df
     score_col = agg_choice
+    has_meta  = "meta_score" in risk_df.columns
 
-    # ── GA summary (always rendered, expanded when GA is active) ─────────────
+    # ── GA summary / meta summary (always rendered) ────────────────────────────
     render_ga_summary()
     render_meta_summary()
 
     if not run_btn and "ran" not in st.session_state:
-        st.info("Configure settings in the sidebar and click **Run Analysis**.")
+        st.info("Configure settings in the sidebar and click **▶ Run Analysis**.")
         st.stop()
 
     st.session_state["ran"] = True
 
-    # ── Compute results ───────────────────────────────────────────────────────
+    # ── Compute standalone results ────────────────────────────────────────────
     filtered_df, cutoff = apply_user_threshold(user_df, score_col, thresh_pct)
     metrics = evaluate_topk_users(filtered_df, insider_users, k_choice)
 
-    # ── Section 1: Metrics ────────────────────────────────────────────────────
+    # ── Compute meta-model top-K results ──────────────────────────────────────
+    meta_metrics: dict = {}
+    if has_meta and insider_users:
+        meta_sorted = (
+            risk_df.dropna(subset=["meta_score"])
+                   .sort_values("meta_score", ascending=False)
+        )
+        actual_k    = min(k_choice, len(meta_sorted))
+        top_meta_k  = set(meta_sorted.head(actual_k)["user"])
+        tp_m   = len(top_meta_k & insider_users)
+        fp_m   = actual_k - tp_m
+        fn_m   = len(insider_users) - tp_m
+        prec_m = tp_m / actual_k if actual_k else 0.0
+        rec_m  = tp_m / len(insider_users) if insider_users else 0.0
+        f1_m   = 2 * prec_m * rec_m / (prec_m + rec_m) if (prec_m + rec_m) > 0 else 0.0
+        meta_metrics = {"tp": tp_m, "fp": fp_m, "fn": fn_m,
+                        "precision": prec_m, "recall": rec_m, "f1": f1_m}
+
+    # ── Section 1: Detection Metrics ─────────────────────────────────────────
     st.header("📊 Detection Metrics")
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
-    c1.metric("Precision",  f"{metrics['precision']:.3f}")
-    c2.metric("Recall",     f"{metrics['recall']:.3f}")
-    c3.metric("F1",         f"{metrics['f1']:.3f}")
-    c4.metric("TP",         metrics["tp"])
-    c5.metric("FP",         metrics["fp"])
-    c6.metric("FN",         metrics["fn"])
+
+    if not show_ground_truth:
+        st.info(
+            "Ground-truth labels are hidden — all metrics show as zero.  \n"
+            "Enable **Show ground-truth labels** in the sidebar to see real results."
+        )
+    else:
+        score_label = _ga_score_label()
+        st.caption(
+            f"**Standalone {model_choice}** — {agg_choice}, "
+            f"{thresh_pct}th-pct threshold, K={k_choice}"
+        )
+        c1, c2, c3, c4, c5, c6 = st.columns(6)
+        c1.metric("Precision", f"{metrics['precision']:.3f}")
+        c2.metric("Recall",    f"{metrics['recall']:.3f}")
+        c3.metric("F1",        f"{metrics['f1']:.3f}")
+        c4.metric("TP",        metrics["tp"])
+        c5.metric("FP",        metrics["fp"])
+        c6.metric("FN",        metrics["fn"])
+
+        if has_meta and meta_metrics:
+            st.caption(f"**Meta-Model Ensemble — Final System ★** — K={k_choice}")
+            m1, m2, m3, m4, m5, m6 = st.columns(6)
+            m1.metric("Precision", f"{meta_metrics['precision']:.3f}",
+                      delta=f"{meta_metrics['precision'] - metrics['precision']:+.3f}")
+            m2.metric("Recall",    f"{meta_metrics['recall']:.3f}",
+                      delta=f"{meta_metrics['recall'] - metrics['recall']:+.3f}")
+            m3.metric("F1",        f"{meta_metrics['f1']:.3f}",
+                      delta=f"{meta_metrics['f1'] - metrics['f1']:+.3f}")
+            m4.metric("TP",        meta_metrics["tp"],
+                      delta=int(meta_metrics["tp"] - metrics["tp"]))
+            m5.metric("FP",        meta_metrics["fp"])
+            m6.metric("FN",        meta_metrics["fn"])
 
     pool = len(filtered_df)
     st.caption(
-        f"Threshold (train {thresh_pct}th pct of user {score_col}) = **{cutoff:.4f}**  |  "
-        f"Pool after filter: **{pool}** users  |  "
-        f"Flagging top **{k_choice}** as suspicious"
+        f"Standalone threshold (train {thresh_pct}th pct of {score_col}) = **{cutoff:.4f}**  |  "
+        f"Pool after filter: **{pool}** users  |  Flagging top **{k_choice}**"
     )
     st.markdown("---")
 
     # ── Section 2: Top suspicious users table ────────────────────────────────
     score_label = _ga_score_label()
-    st.header(f"🚨 Top Suspicious Users  —  {score_label}")
-    top_k_users = set(filtered_df.head(k_choice)["user"])
-    display_df  = risk_df[risk_df["user"].isin(top_k_users)].copy()
-    display_df["rank"] = display_df["user"].apply(
-        lambda u: list(filtered_df.head(k_choice)["user"]).index(u) + 1
-        if u in list(filtered_df.head(k_choice)["user"]) else "-"
+
+    # Sort and rank by meta_score when available, risk_score otherwise.
+    # Both rank assignment and table sort use the same column — no mismatch.
+    sort_col   = "meta_score" if has_meta else "risk_score"
+    sort_label = "Meta Score ★" if has_meta else score_label
+    top_by_sort = (
+        risk_df.dropna(subset=[sort_col])
+               .sort_values(sort_col, ascending=False)
     )
+    top_k_users = set(top_by_sort.head(k_choice)["user"])
+    display_df  = top_by_sort[top_by_sort["user"].isin(top_k_users)].copy()
+    display_df  = display_df.reset_index(drop=True)
+    display_df["rank"] = range(1, len(display_df) + 1)
+
+    st.header(f"🚨 Top Suspicious Users  —  ranked by {sort_label}")
 
     show_cols = ["rank", "user", "employee_name", "risk_score",
                  "lstm_p95_norm", "after_hours_norm", "bcc_usage_norm",
@@ -610,39 +712,38 @@ def main() -> None:
             show_cols.append(opt)
     if show_ground_truth and "is_insider" in display_df.columns:
         show_cols.append("is_insider")
-    display_df = display_df.sort_values("risk_score", ascending=False)
 
     col_rename = {
         "rank": "Rank", "user": "User ID", "employee_name": "Name",
-        "risk_score":              score_label,
-        "lstm_p95_norm":           "LSTM P95",
-        "after_hours_norm":        "After Hours",
-        "bcc_usage_norm":          "BCC Usage",
-        "file_exfil_norm":         "File Exfil",
-        "usb_activity_norm":       "USB Activity",
-        "content_sensitivity_norm":"Content Sensitivity",
-        "max_file_exfil_norm":     "Max Exfil (day)",
-        "max_usb_norm":            "Max USB (day)",
-        "if_inverted_norm":        "IF Inverted",
-        "flagged_day_norm":        "Flagged Day Rate",
-        "latent_dist_norm":        "Latent Distance",
-        "meta_score":              "Meta Score",
-        "is_insider":              "Insider?",
+        "risk_score":               score_label,
+        "lstm_p95_norm":            "LSTM P95",
+        "after_hours_norm":         "After Hours",
+        "bcc_usage_norm":           "BCC Usage",
+        "file_exfil_norm":          "File Exfil",
+        "usb_activity_norm":        "USB Activity",
+        "content_sensitivity_norm": "Content Sensitivity",
+        "max_file_exfil_norm":      "Max Exfil (day)",
+        "max_usb_norm":             "Max USB (day)",
+        "if_inverted_norm":         "IF Inverted",
+        "flagged_day_norm":         "Flagged Day Rate",
+        "latent_dist_norm":         "Latent Distance",
+        "meta_score":               "Meta Score ★",
+        "is_insider":               "Insider?",
     }
     fmt = {
-        score_label:          "{:.4f}",
-        "LSTM P95":           "{:.3f}",
-        "After Hours":        "{:.3f}",
-        "BCC Usage":          "{:.3f}",
-        "File Exfil":         "{:.3f}",
-        "USB Activity":       "{:.3f}",
-        "Content Sensitivity":"{:.3f}",
-        "Max Exfil (day)":    "{:.3f}",
-        "Max USB (day)":      "{:.3f}",
-        "IF Inverted":        "{:.3f}",
-        "Flagged Day Rate":   "{:.3f}",
-        "Latent Distance":    "{:.3f}",
-        "Meta Score":         "{:.4f}",
+        score_label:           "{:.4f}",
+        "LSTM P95":            "{:.3f}",
+        "After Hours":         "{:.3f}",
+        "BCC Usage":           "{:.3f}",
+        "File Exfil":          "{:.3f}",
+        "USB Activity":        "{:.3f}",
+        "Content Sensitivity": "{:.3f}",
+        "Max Exfil (day)":     "{:.3f}",
+        "Max USB (day)":       "{:.3f}",
+        "IF Inverted":         "{:.3f}",
+        "Flagged Day Rate":    "{:.3f}",
+        "Latent Distance":     "{:.3f}",
+        "Meta Score ★":        "{:.4f}",
     }
     st.dataframe(
         display_df[show_cols].rename(columns=col_rename)
@@ -650,8 +751,13 @@ def main() -> None:
                              .style.format(fmt),
         use_container_width=True,
     )
+    if has_meta:
+        st.caption(
+            "★ Table sorted by **Meta Score** (Phase 4 final system). "
+            f"{score_label} is the intermediate GA-weighted signal."
+        )
     if not sensitivity_available:
-        st.caption("Content Sensitivity column is all zeros — run the sensitivity scorer to populate it.")
+        st.caption("Content Sensitivity is all zeros — run the sensitivity scorer to populate it.")
     st.markdown("---")
 
     # ── Section 3: Charts ─────────────────────────────────────────────────────
@@ -664,22 +770,33 @@ def main() -> None:
     k_sweep = [5, 10, 20, 30, 50, 75, 100]
     with tab1:
         st.pyplot(fig_prf1_vs_k(user_df, score_col, thresh_pct, insider_users, k_sweep))
+        if not show_ground_truth:
+            st.caption("Enable ground-truth labels to see real P/R/F1 curves.")
     with tab2:
         st.pyplot(fig_score_distribution(lstm_user_df, insider_users))
     with tab3:
         top_n = min(k_choice, 20)
-        st.pyplot(fig_top_users_bar(risk_df, insider_users, top_n=top_n,
-                                    score_label=score_label))
+        if has_meta:
+            st.pyplot(fig_top_users_bar(
+                risk_df, insider_users, top_n=top_n,
+                score_label="Meta Score ★", score_col="meta_score",
+            ))
+            st.caption("Ranked by Meta Score (final system). Red ★ = confirmed insider.")
+        else:
+            st.pyplot(fig_top_users_bar(
+                risk_df, insider_users, top_n=top_n,
+                score_label=score_label, score_col="risk_score",
+            ))
     with tab4:
         st.pyplot(fig_tp_fp_fn(user_df, score_col, thresh_pct, insider_users))
 
     st.markdown("---")
 
-    # ── Section 4: User explainability ───────────────────────────────────────
+    # ── Section 4: User Investigation ────────────────────────────────────────
     st.header("🔍 User Investigation")
-    st.markdown("Select a flagged user to see why they were flagged.")
+    st.markdown("Select a user from the top-K list to see their signal breakdown.")
 
-    flagged_users = list(filtered_df.head(k_choice)["user"])
+    flagged_users = list(display_df["user"])
     selected_user = st.selectbox("Select user", flagged_users)
 
     if selected_user:
@@ -688,73 +805,52 @@ def main() -> None:
         st.subheader(f"{emp}  ({selected_user})")
 
         mc1, mc2, mc3, mc4 = st.columns(4)
-        mc1.metric(score_label,  f"{row['risk_score']:.4f}")
-        mc2.metric("LSTM P95",    f"{row['score_p95']:.4f}")
-        if "content_sensitivity_norm" in row.index:
-            mc3.metric("Content Sensitivity", f"{row['content_sensitivity_norm']:.3f}")
-        if show_ground_truth and "is_insider" in row.index:
-            mc4.metric("Ground Truth", "Insider ★" if row["is_insider"] else "Normal")
+        mc1.metric(score_label, f"{row['risk_score']:.4f}")
+        mc2.metric("LSTM P95",  f"{row['score_p95']:.4f}")
+        meta_val = row.get("meta_score") if "meta_score" in row.index else None
+        if meta_val is not None and not pd.isna(meta_val):
+            mc3.metric("Meta Score ★", f"{meta_val:.4f}")
+            if show_ground_truth and "is_insider" in row.index:
+                mc4.metric("Ground Truth", "Insider ★" if row["is_insider"] else "Normal")
+            elif "content_sensitivity_norm" in row.index:
+                mc4.metric("Content Sensitivity", f"{row['content_sensitivity_norm']:.3f}")
+        else:
+            if "content_sensitivity_norm" in row.index:
+                mc3.metric("Content Sensitivity", f"{row['content_sensitivity_norm']:.3f}")
+            if show_ground_truth and "is_insider" in row.index:
+                mc4.metric("Ground Truth", "Insider ★" if row["is_insider"] else "Normal")
 
         st.markdown("**Triggered behavioral flags:**")
         flags = explain_user(row)
         for flag in flags:
             st.markdown(f"- {flag}")
 
-        # Signal breakdown bar — all signals
-        _SIGNAL_COL_MAP = {
-            "lstm_p95":            "lstm_p95_norm",
-            "after_hours":         "after_hours_norm",
-            "bcc_usage":           "bcc_usage_norm",
-            "file_exfil":          "file_exfil_norm",
-            "usb_activity":        "usb_activity_norm",
-            "multi_pc":            "multi_pc_norm",
-            "content_sensitivity": "content_sensitivity_norm",
-            "max_file_exfil":      "max_file_exfil_norm",
-            "max_usb":             "max_usb_norm",
-            "if_inverted":         "if_inverted_norm",
-            "flagged_day_rate":    "flagged_day_norm",
-            "latent_dist":         "latent_dist_norm",
-            "meta_score":          "meta_score",
-        }
-        signals: dict[str, float] = {}
-        for key, (label, _) in _SIGNAL_DISPLAY.items():
-            col_name = _SIGNAL_COL_MAP.get(key, f"{key}_norm")
-            if col_name in row.index:
-                signals[label] = float(row[col_name])
-
-        # Derive per-signal flag threshold for the breakdown chart
+        # Individual signal breakdown — meta_score excluded (it IS the composite,
+        # showing it beside its own inputs would be misleading)
         from risk_scorer import _FLAG_RULES  # noqa: E402
         col_to_thresh = {rule[0]: rule[2] for rule in _FLAG_RULES}
-        norm_col_map = {
-            "LSTM P95":             "lstm_p95_norm",
-            "After Hours":          "after_hours_norm",
-            "BCC Usage":            "bcc_usage_norm",
-            "File Exfil":           "file_exfil_norm",
-            "USB Activity":         "usb_activity_norm",
-            "Multi PC":             "multi_pc_norm",
-            "Content Sensitivity":  "content_sensitivity_norm",
-            "Max File Exfil (day)": "max_file_exfil_norm",
-            "Max USB (day)":        "max_usb_norm",
-            "IF Inverted":          "if_inverted_norm",
-            "Flagged Day Rate":     "flagged_day_norm",
-            "Latent Distance":      "latent_dist_norm",
-            "Meta Score":           "meta_score",
-        }
+
+        signals: dict[str, float] = {}
+        for key, (lbl, _) in _SIGNAL_DISPLAY.items():
+            if key == "meta_score":
+                continue
+            col_name = _SIGNAL_COL_MAP.get(key, f"{key}_norm")
+            if col_name in row.index:
+                signals[lbl] = float(row[col_name])
+
         sig_df = pd.DataFrame({"Signal": list(signals.keys()),
                                "Value":  list(signals.values())})
         bar_colors = []
         for lbl in sig_df["Signal"]:
-            thresh = col_to_thresh.get(norm_col_map.get(lbl, ""), 0.5)
-            val    = signals.get(lbl, 0.0)
-            bar_colors.append("#E85454" if val >= thresh else "#4C9BE8")
+            thresh = col_to_thresh.get(_NORM_COL_MAP.get(lbl, ""), 0.5)
+            bar_colors.append("#E85454" if signals.get(lbl, 0.0) >= thresh else "#4C9BE8")
 
-        # Reference line: use the median flag threshold across all signals
         median_thresh = float(np.median([r[2] for r in _FLAG_RULES]))
         fig, ax = plt.subplots(figsize=(6, 3.2))
         ax.barh(sig_df["Signal"], sig_df["Value"], color=bar_colors, alpha=0.85)
         ax.axvline(median_thresh, color="gray", linestyle="--", linewidth=1,
                    label=f"Median flag threshold ({median_thresh:.2f})")
-        ax.set_xlabel("Normalised Signal Value")
+        ax.set_xlabel("Normalised Signal Value (0–1)")
         ax.set_title(f"Signal Breakdown — {selected_user}")
         ax.set_xlim(0, 1)
         ax.legend(fontsize=8)
@@ -762,86 +858,147 @@ def main() -> None:
         fig.tight_layout()
         st.pyplot(fig)
         plt.close(fig)
+        st.caption("Red bars = signal above its flag threshold. Meta Score is shown as a tile above, not here.")
 
     st.markdown("---")
 
-    # ── Section 5: AI component explanation ──────────────────────────────────
+    # ── Section 5: AI Algorithm Component ────────────────────────────────────
     st.header("🤖 AI Algorithm Component")
     col_a, col_b = st.columns([1, 1])
     with col_a:
         ga_blurb = (
-            "\n\n6. **Genetic Algorithm Weight Optimisation** — a GA evolves the "
-            "six behavioural-signal weights and flag thresholds over 100 generations "
-            "using F1@K as the fitness function. The optimised weights are loaded "
-            "automatically, replacing domain defaults without retraining any model."
+            "\n\n7. **Genetic Algorithm Weight Optimisation** — evolves the 13 "
+            "signal weights and flag thresholds over 100 generations using F1@K "
+            "as fitness. Optimised weights feed into the risk score (intermediate "
+            "signal) and into the meta-model feature matrix."
             if _GA_LOADED else
-            "\n\n6. **Genetic Algorithm (optional)** — run `python colab/ga_optimizer.py` "
-            "to evolve optimised signal weights and flag thresholds that maximise F1@K. "
-            "Results are loaded automatically on the next dashboard refresh."
+            "\n\n7. **Genetic Algorithm (optional)** — run `python colab/ga_optimizer.py` "
+            "to evolve optimised signal weights. Results load automatically on refresh."
+        )
+        meta_blurb = (
+            "\n\n8. **Phase 4 — Meta-Model Ensemble (Final System ★)** — a "
+            "regularised Logistic Regression is trained on all 13 normalised signals "
+            "using CERT ground-truth labels (train-split only). It learns a "
+            "data-driven combination that outperforms any fixed-weight heuristic. "
+            "A 3-way majority voting ensemble (LSTM ∪ IF ∪ Risk top-K) provides "
+            "a complementary unsupervised cross-check."
+            if meta_available else
+            "\n\n8. **Phase 4 — Meta-Model (not yet run)** — run "
+            "`python colab/meta_model.py` to train the supervised ensemble and "
+            "activate the final system."
         )
         st.markdown(f"""
-**{_ga_score_label()} — Multi-Signal Evidence Aggregation**
+**Multi-Signal Evidence Aggregation — 4-Phase Pipeline**
 
-This system implements a *multi-signal evidence aggregation* algorithm:
+1. **LSTM Autoencoder** (Phases 1 & 3) — detects temporal anomalies via
+   reconstruction error on 7-day sliding windows of **38 daily features**.
+   Per-user z-score normalisation compares each user to their own baseline.
+   Latent distance from the training centroid captures gradual behavioural drift.
 
-1. **LSTM Autoencoder** (deep learning) — detects temporal behavioural anomalies
-   by measuring reconstruction error on sequences of daily activity features.
+2. **Isolation Forest** (Phases 1 & 2) — density-based scoring augmented
+   with Phase 2 features: velocity/delta signals for gradual escalation,
+   external recipient ratio, and cyclical time encoding (hour/weekday sin-cos).
+   With Phase 2 features, IF scores insiders **directly** (higher = more suspicious).
 
-2. **Behavioural Signal Extraction** — five rule-based indicators derived from
-   CERT insider threat research (after-hours activity, BCC email usage,
-   removable media file transfers, USB events, multi-workstation access).
+3. **13-Signal Normalised Risk Score** (Phases 1–3) — LSTM P95, after-hours
+   activity, BCC usage, file exfiltration, USB activity, multi-PC access,
+   burst-day spikes, content sensitivity, flagged-day rate, latent distance,
+   and inverted IF — each scaled to [0, 1] and combined using
+   {"GA-optimised" if _GA_LOADED else "domain-informed"} weights.
 
-3. **DLP Content Sensitivity** — lightweight keyword/rule-based classifier
-   applied to email and file content, scoring events as PUBLIC / INTERNAL /
-   SENSITIVE / RESTRICTED. The per-user daily mean feeds into the risk score
-   as the seventh signal.
+4. **Rule-Based Explainability (XAI)** — each flagged user receives a
+   natural-language explanation for which signals crossed their thresholds.
 
-4. **Normalised Weighted Aggregation** — each signal is scaled to [0, 1] and
-   combined using {"GA-optimised" if _GA_LOADED else "domain-informed"} weights,
-   producing a single *{_ga_score_label().lower()}*.
+5. **DLP Content Sensitivity** — keyword/rule classifier scoring email and
+   file content as PUBLIC / INTERNAL / SENSITIVE / RESTRICTED.
 
-5. **Best-First Investigation Queue** — users are ranked by risk score
-   (highest first), forming a priority queue that guides investigators to
-   the highest-risk cases first — equivalent to best-first search over
-   the suspicious-user population.
-
-6. **Rule-Based Explainability (XAI)** — each flagged user receives a
-   natural-language explanation identifying which signals triggered the alert.
-{ga_blurb}
+6. **Best-First Investigation Queue** — users ranked by the final system
+   score form a priority queue guiding analysts to highest-risk cases first.
+{ga_blurb}{meta_blurb}
         """)
     with col_b:
         st.pyplot(fig_weights_pie())
         plt.close()
 
-    # ── Section 6: Best settings summary ─────────────────────────────────────
+    # ── Section 6: Best Configuration Summary ────────────────────────────────
     st.markdown("---")
     st.header("✅ Best Configuration Summary")
 
-    ga_report = _load_json_safe(GA_REPORT_JSON)
-    if _GA_LOADED and ga_report:
-        res = ga_report.get("results", {})
-        m   = res.get("metrics_at_k", {})
-        bm  = res.get("baseline_metrics_at_k", {})
-        im  = res.get("improvement", {})
-        st.success(
-            f"**Best overall setup (GA-optimised + user-level evaluation):**  \n"
-            f"Model: **LSTM Autoencoder** | Aggregation: **score_p95** | "
-            f"Threshold: **80th percentile** | K = **{m.get('k', 50)}**  \n"
-            f"→ GA F1 = **{m.get('f1', 0):.4f}** "
-            f"(baseline {bm.get('f1', 0):.4f}, Δ{im.get('delta_f1', 0):+.4f})  "
-            f"| **{m.get('tp', 0)} / {len(insider_users)} insiders detected**  \n\n"
-            f"At K=20, Precision rises to **0.50** — half of the flagged users are real insiders.  \n"
-            "IF is used in **inverted** form: low IF score = insider-like masking behavior."
+    ga_report   = _load_json_safe(GA_REPORT_JSON)
+    meta_report = _load_json_safe(META_REPORT_JSON)
+
+    col_s, col_m = st.columns(2)
+
+    with col_s:
+        st.markdown("**Best Standalone Detector** (unsupervised)")
+        if _GA_LOADED and ga_report:
+            res = ga_report.get("results", {})
+            m   = res.get("metrics_at_k", {})
+            bm  = res.get("baseline_metrics_at_k", {})
+            im  = res.get("improvement", {})
+            st.info(
+                f"Model: **{model_choice}** | Agg: **{agg_choice}**  \n"
+                f"Threshold: **80th pct** | K = **{m.get('k', 50)}**  \n"
+                f"GA F1 = **{m.get('f1', 0):.4f}** "
+                f"(baseline {bm.get('f1', 0):.4f}, Δ{im.get('delta_f1', 0):+.4f})  \n"
+                f"**{m.get('tp', 0)} / {len(insider_users) or '?'} insiders detected**  \n\n"
+                "Phase 2 features make IF score insiders **directly** (higher = more suspicious)."
+            )
+        else:
+            st.info(
+                f"Model: **{model_choice}** | Agg: **{agg_choice}**  \n"
+                "Threshold: **80th pct** | K = **50**  \n"
+                "Run `python colab/ga_optimizer.py` to activate GA-optimised weights."
+            )
+
+    with col_m:
+        st.markdown("**Final System — Meta-Model Ensemble ★**")
+        if meta_report:
+            meta_topk = meta_report.get("meta_topk", [])
+            best_k    = max(meta_topk, key=lambda r: r.get("f1", 0)) if meta_topk else {}
+            n_ins     = meta_report.get("n_insiders", len(insider_users) or "?")
+            st.success(
+                f"Supervised Logistic Regression on **13 signals**  \n"
+                f"CV ROC-AUC = **{meta_report.get('cv_roc_auc', 0):.4f}**  |  "
+                f"CV Avg-Prec = **{meta_report.get('cv_avg_precision', 0):.4f}**  \n"
+                f"K = {best_k.get('k', '?')}  →  "
+                f"**{best_k.get('tp', '?')} / {n_ins} insiders detected**  \n"
+                f"Precision = **{best_k.get('precision', 0):.4f}**  |  "
+                f"Recall = **{best_k.get('recall', 0):.4f}**  |  "
+                f"F1 = **{best_k.get('f1', 0):.4f}**"
+            )
+        elif meta_available:
+            st.success("Meta-model scores loaded. Run `python colab/meta_model.py` for the full report.")
+        else:
+            st.warning(
+                "Meta-model not yet run.  \n"
+                "Execute `python colab/meta_model.py` to activate Phase 4."
+            )
+
+    # ── Section 7: Final System — Meta-Model ─────────────────────────────────
+    if has_meta and show_ground_truth and meta_metrics:
+        st.markdown("---")
+        st.header("🏆 Final System — Meta-Model Ensemble")
+        st.markdown(
+            "The supervised meta-model is the **true final result** of this pipeline. "
+            "It learns a data-driven signal combination from CERT ground-truth labels, "
+            "outperforming any standalone anomaly detector."
         )
-    else:
-        st.success(
-            "**Best overall setup (from user-level evaluation):**  \n"
-            "Model: **LSTM Autoencoder** | Aggregation: **score_p95** | "
-            "Threshold: **80th percentile** | K = **50**  \n"
-            f"→ Precision/Recall/F1 depend on the auto-selected CERT release; "
-            f"currently tracking **{len(insider_users)} matching insider users**.  \n\n"
-            "At K=20, Precision rises to **0.50** — half of the flagged users are real insiders.  \n"
-            "IF is used in **inverted** form: low IF score = insider-like masking behavior."
+        fm1, fm2, fm3, fm4, fm5, fm6 = st.columns(6)
+        fm1.metric("Precision", f"{meta_metrics['precision']:.4f}")
+        fm2.metric("Recall",    f"{meta_metrics['recall']:.4f}")
+        fm3.metric("F1",        f"{meta_metrics['f1']:.4f}")
+        fm4.metric("TP",        meta_metrics["tp"])
+        fm5.metric("FP",        meta_metrics["fp"])
+        fm6.metric("FN",        meta_metrics["fn"])
+        delta_tp = meta_metrics["tp"] - metrics["tp"]
+        sign     = "+" if delta_tp >= 0 else ""
+        st.caption(
+            f"K = {k_choice}  |  "
+            f"**{meta_metrics['tp']} / {len(insider_users)} insiders detected**  |  "
+            f"vs standalone {model_choice}: "
+            f"TP {sign}{delta_tp}   "
+            f"F1 {metrics['f1']:.3f} → {meta_metrics['f1']:.3f}"
         )
 
 

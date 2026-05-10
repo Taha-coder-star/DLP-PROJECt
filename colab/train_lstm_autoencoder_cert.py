@@ -3,7 +3,9 @@ Global LSTM autoencoder for insider threat anomaly detection on CERT daily email
 
 Single model trained on all users' training windows combined — much faster than
 per-user training, fills the GPU properly, and learns cross-user behavioral norms.
-Reconstruction error on a 7-day sliding window is the anomaly score.
+Mean reconstruction error on a 7-day sliding window is the anomaly score.
+Per-user latent distance from the training-period centroid is saved as a
+complementary signal that detects gradual behavioural drift.
 
 Per-user z-score normalization is applied before the global MinMaxScaler so that
 each user's features are measured against their own baseline rather than the global
@@ -52,7 +54,6 @@ BEHAVIORAL_FEATURES = [
 ]
 
 WINDOW_SIZE    = 7
-WINDOW_SIZES   = [1, 3, 7]   # Idea 11: multi-window scoring sizes
 HIDDEN_DIM     = 64
 LATENT_DIM     = 32
 EPOCHS         = 20
@@ -99,23 +100,6 @@ def make_windows(arr: np.ndarray, window_size: int) -> np.ndarray:
         [arr[i : i + window_size] for i in range(n - window_size + 1)]
     ).astype(np.float32)
 
-
-def make_padded_windows(scaled: np.ndarray, window_size: int) -> np.ndarray:
-    """Idea 11: one window per day, ending at that day, zero-padded at front.
-
-    Unlike make_windows(), this produces exactly n_days windows — every day
-    gets scored including the first window_size-1 days that have no full
-    history yet. Zero-padding represents "no activity" days.
-
-    Returns shape: (n_days, window_size, n_features).
-    """
-    n_days, n_features = scaled.shape
-    windows = np.zeros((n_days, window_size, n_features), dtype=np.float32)
-    for d in range(n_days):
-        start  = max(0, d - window_size + 1)
-        actual = scaled[start : d + 1]
-        windows[d, -len(actual):, :] = actual   # fill from the END of the slot
-    return windows
 
 
 def compute_user_stats(
@@ -305,18 +289,19 @@ def score_all_users(
     user_stats: UserStats,
     global_stats: tuple[np.ndarray, np.ndarray],
 ) -> pd.DataFrame:
-    """Score every user-day with multi-window last-step MSE + latent distance.
+    """Score every user-day with 7-day sliding window mean MSE + latent distance.
 
-    Idea 11 — multi-window last-step MSE:
-      Instead of mean MSE across all 7 days (which dilutes a single anomalous
-      day), we use MSE of the FINAL time step only. We also score with 1-day
-      and 3-day padded windows and take the max per day. This ensures single-day
-      insider incidents are not averaged away by preceding normal days.
+    Mean MSE over the full window is used instead of last-step-only because:
+      - It matches the training objective (the model minimises mean MSE)
+      - It is more stable (averaging 7 steps vs 1 reduces variance)
+      - Zero-padded or short windows would be OOD for this LSTM; we avoid them
+        by using only full 7-day real windows (days 0–5 receive score 0)
 
     Idea 12 — latent distance:
       Each user's training-period latent vectors define a 'normal' centroid.
-      L2 distance from this centroid is saved as a complementary signal — it
+      L2 distance from this centroid is saved as a complementary signal that
       detects behavioural drift even when reconstruction error is moderate.
+      Only windows built from real data are used here too.
     """
     scored_chunks = []
 
@@ -327,14 +312,14 @@ def score_all_users(
         raw    = user_rows[BEHAVIORAL_FEATURES].fillna(0).values
         scaled = normalize(raw, user, user_stats, global_stats, scaler)
 
-        # ── Idea 11: max last-step MSE across multiple window sizes ──────────
+        # 7-day sliding windows — real data only, no zero-padding
+        windows = make_windows(scaled, WINDOW_SIZE)  # (n_days - W + 1, W, n_features)
+
         day_errors = np.zeros(n_days, dtype=np.float32)
-        for window_size in WINDOW_SIZES:
-            padded_wins = make_padded_windows(scaled, window_size)  # (n_days, ws, nf)
-            errors      = batch_reconstruction_errors(
-                model, padded_wins, device, last_step_only=True
-            )
-            day_errors = np.maximum(day_errors, errors)
+        if len(windows) > 0:
+            errors = batch_reconstruction_errors(model, windows, device)
+            # errors[i] belongs to day (WINDOW_SIZE - 1 + i)
+            day_errors[WINDOW_SIZE - 1:] = errors
 
         day_scores = np.clip(
             (day_errors - suspicious_threshold * 0.5) /
@@ -342,19 +327,19 @@ def score_all_users(
             0.0, 1.0,
         )
 
-        # ── Idea 12: latent distance from per-user training centroid ─────────
-        train_mask  = (user_rows["dataset_split"] == "train").values
+        # Latent distance from per-user training centroid (real windows only)
+        train_mask   = (user_rows["dataset_split"] == "train").values
         train_scaled = scaled[train_mask]
-        if len(train_scaled) > 0:
-            train_wins    = make_padded_windows(train_scaled, WINDOW_SIZE)
+        latent_dist  = np.zeros(n_days, dtype=np.float32)
+
+        if len(train_scaled) >= WINDOW_SIZE:
+            train_wins    = make_windows(train_scaled, WINDOW_SIZE)
             train_latents = get_latent_vectors(model, train_wins, device)
             centroid      = train_latents.mean(axis=0)
-        else:
-            centroid = np.zeros(LATENT_DIM, dtype=np.float32)
-
-        all_wins      = make_padded_windows(scaled, WINDOW_SIZE)
-        all_latents   = get_latent_vectors(model, all_wins, device)
-        latent_dist   = np.linalg.norm(all_latents - centroid, axis=1).astype(np.float32)
+            if len(windows) > 0:
+                all_latents = get_latent_vectors(model, windows, device)
+                dists = np.linalg.norm(all_latents - centroid, axis=1).astype(np.float32)
+                latent_dist[WINDOW_SIZE - 1:] = dists
 
         user_rows["lstm_raw_error"]     = day_errors
         user_rows["lstm_score"]         = day_scores
@@ -492,23 +477,23 @@ def main() -> None:
     print("\nTraining global LSTM autoencoder...")
     model = train_global_model(train_windows, device)
 
-    # Compute global thresholds using last-step MSE (matches scoring mode).
-    # Using last_step_only=True here ensures the threshold scale is consistent
-    # with how scores are computed in score_all_users() — multi-window, last step.
-    print("\nComputing global anomaly thresholds (last-step MSE, multi-window)...")
-    train_errors_ls_chunks = []
+    # Compute global thresholds from 7-day sliding window mean MSE on training data.
+    # Must match exactly how scores are computed in score_all_users() (same windows,
+    # same MSE reduction) so the [0, 1] day_scores scale is well-calibrated.
+    print("\nComputing global anomaly thresholds (7-day window, mean MSE)...")
+    train_errors_chunks = []
     train_df_grouped = df[df["dataset_split"] == "train"].groupby("user", sort=False)
     for user, user_rows in train_df_grouped:
         user_rows = user_rows.sort_values("email_day")
         raw    = user_rows[BEHAVIORAL_FEATURES].fillna(0).values
         scaled = normalize(raw, user, user_stats, global_stats, scaler)
-        for ws in WINDOW_SIZES:
-            padded = make_padded_windows(scaled, ws)
-            errs   = batch_reconstruction_errors(model, padded, device, last_step_only=True)
-            train_errors_ls_chunks.append(errs)
-    train_errors_ls      = np.concatenate(train_errors_ls_chunks)
-    suspicious_threshold = float(np.percentile(train_errors_ls, 95))
-    high_threshold       = float(np.percentile(train_errors_ls, 99))
+        windows = make_windows(scaled, WINDOW_SIZE)
+        if len(windows) > 0:
+            errs = batch_reconstruction_errors(model, windows, device)
+            train_errors_chunks.append(errs)
+    train_errors         = np.concatenate(train_errors_chunks) if train_errors_chunks else np.array([0.0])
+    suspicious_threshold = float(np.percentile(train_errors, 95))
+    high_threshold       = float(np.percentile(train_errors, 99))
     print(f"  Suspicious threshold (p95): {suspicious_threshold:.6f}")
     print(f"  High threshold       (p99): {high_threshold:.6f}")
 

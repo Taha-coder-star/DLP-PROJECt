@@ -61,11 +61,13 @@ def compute_user_scores(
     train users for threshold calibration without leaking test behaviour).
     """
     agg = df.groupby("user").agg(
-        score_max     = (score_col, "max"),
-        score_mean    = (score_col, "mean"),
-        score_p95     = (score_col, lambda x: float(np.percentile(x.dropna(), 95))
-                                              if x.dropna().size else 0.0),
-        dataset_split = ("dataset_split", lambda x: x.mode().iloc[0]),
+        score_max      = (score_col, "max"),
+        score_mean     = (score_col, "mean"),
+        score_p95      = (score_col, lambda x: float(np.percentile(x.dropna(), 95))
+                                               if x.dropna().size else 0.0),
+        score_flag_rate= (score_col, lambda x: float((x.dropna() >= 0.5).mean())
+                                               if x.dropna().size else 0.0),
+        dataset_split  = ("dataset_split", lambda x: x.mode().iloc[0]),
     ).reset_index()
     agg["is_insider"] = agg["user"].isin(insider_users).astype(int)
     return agg

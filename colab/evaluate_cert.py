@@ -92,6 +92,19 @@ def main() -> None:
             f"positives={report['if_day_test'].get('n_insiders', 0)}"
         )
 
+        # Idea 4: all-split evaluation — counts insider days in train period too
+        all_idf = idf.merge(day_labels, on=["user", "email_day"], how="left")
+        all_idf["is_insider"] = all_idf["is_insider"].fillna(0).astype(int)
+        y_true = all_idf["is_insider"].values
+        y_score = all_idf["iforest_score"].values
+        y_pred = all_idf["risk_severity"].isin(["suspicious", "high"]).astype(int).values
+        report["if_day_all"] = evaluate(y_true, y_score, y_pred)
+        print(
+            "  IF day all   : "
+            f"ROC={report['if_day_all'].get('roc_auc', 'n/a')} "
+            f"positives={report['if_day_all'].get('n_insiders', 0)}"
+        )
+
         user_max = idf.groupby("user")["iforest_score"].max().reset_index()
         labels = pd.DataFrame({"user": sorted(insider_users), "is_insider": 1})
         user_max = user_max.merge(labels, on="user", how="left")
@@ -133,6 +146,19 @@ def main() -> None:
             f"positives={report['lstm_day_test'].get('n_insiders', 0)}"
         )
 
+        # Idea 4: all-split evaluation — counts insider days in train period too
+        all_ldf = ldf.merge(day_labels, on=["user", "email_day"], how="left")
+        all_ldf["is_insider"] = all_ldf["is_insider"].fillna(0).astype(int)
+        y_true = all_ldf["is_insider"].values
+        y_score = all_ldf["lstm_score"].fillna(0).values
+        y_pred = all_ldf["lstm_risk_severity"].isin(["suspicious", "high"]).astype(int).values
+        report["lstm_day_all"] = evaluate(y_true, y_score, y_pred)
+        print(
+            "  LSTM day all : "
+            f"ROC={report['lstm_day_all'].get('roc_auc', 'n/a')} "
+            f"positives={report['lstm_day_all'].get('n_insiders', 0)}"
+        )
+
         user_max = ldf.groupby("user")["lstm_score"].max().reset_index()
         labels = pd.DataFrame({"user": sorted(insider_users), "is_insider": 1})
         user_max = user_max.merge(labels, on="user", how="left")
@@ -155,14 +181,15 @@ def main() -> None:
     print(f"\nSaved evaluation report to: {REPORT_PATH}")
 
     print("\nSUMMARY")
-    print(f"{'Metric':<18} {'IF Day':>10} {'IF User':>10} {'LSTM Day':>10} {'LSTM User':>10}")
-    print("-" * 60)
-    for key in ("roc_auc", "avg_precision", "precision", "recall", "f1"):
-        vals = [
-            report.get(section, {}).get(key, "-")
-            for section in ("if_day_test", "if_user_all", "lstm_day_test", "lstm_user_all")
-        ]
-        print(f"  {key:<16} " + "  ".join(f"{str(value):>10}" for value in vals))
+    sections = ("if_day_test", "if_day_all", "if_user_all",
+                 "lstm_day_test", "lstm_day_all", "lstm_user_all")
+    headers  = ("IF Day(test)", "IF Day(all)", "IF User",
+                 "LSTM Day(test)", "LSTM Day(all)", "LSTM User")
+    print(f"{'Metric':<18} " + "  ".join(f"{h:>14}" for h in headers))
+    print("-" * 102)
+    for key in ("roc_auc", "avg_precision", "precision", "recall", "f1", "tp", "n_insiders"):
+        vals = [report.get(sec, {}).get(key, "-") for sec in sections]
+        print(f"  {key:<16} " + "  ".join(f"{str(v):>14}" for v in vals))
 
 
 if __name__ == "__main__":

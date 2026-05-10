@@ -63,6 +63,8 @@ _SIGNAL_DISPLAY = {
     "max_usb":             ("Max USB (day)",        "#8E44AD"),
     # Idea 1: inverted IF
     "if_inverted":         ("IF Inverted",          "#E67E22"),
+    # Idea 6: persistent anomaly rate
+    "flagged_day_rate":    ("Flagged Day Rate",     "#F39C12"),
 }
 
 # ── page config ───────────────────────────────────────────────────────────────
@@ -425,8 +427,8 @@ def main() -> None:
     )
     thresh_pct = st.sidebar.select_slider(
         "Threshold Percentile",
-        options=[80, 85, 90, 95, 97, 99],
-        value=90,
+        options=[70, 75, 80, 85, 90, 95, 97, 99],
+        value=80,
         help="Pre-filter: keep only users whose score exceeds this percentile "
              "of train-user scores.",
     )
@@ -503,7 +505,7 @@ def main() -> None:
                  "lstm_p95_norm", "after_hours_norm", "bcc_usage_norm",
                  "file_exfil_norm", "usb_activity_norm"]
     for opt in ["content_sensitivity_norm", "max_file_exfil_norm",
-                "max_usb_norm", "if_inverted_norm"]:
+                "max_usb_norm", "if_inverted_norm", "flagged_day_norm"]:
         if opt in display_df.columns:
             show_cols.append(opt)
     if show_ground_truth and "is_insider" in display_df.columns:
@@ -522,6 +524,7 @@ def main() -> None:
         "max_file_exfil_norm":     "Max Exfil (day)",
         "max_usb_norm":            "Max USB (day)",
         "if_inverted_norm":        "IF Inverted",
+        "flagged_day_norm":        "Flagged Day Rate",
         "is_insider":              "Insider?",
     }
     fmt = {
@@ -535,6 +538,7 @@ def main() -> None:
         "Max Exfil (day)":    "{:.3f}",
         "Max USB (day)":      "{:.3f}",
         "IF Inverted":        "{:.3f}",
+        "Flagged Day Rate":   "{:.3f}",
     }
     st.dataframe(
         display_df[show_cols].rename(columns=col_rename)
@@ -604,6 +608,7 @@ def main() -> None:
             "max_file_exfil":      "max_file_exfil_norm",
             "max_usb":             "max_usb_norm",
             "if_inverted":         "if_inverted_norm",
+            "flagged_day_rate":    "flagged_day_norm",
         }
         signals: dict[str, float] = {}
         for key, (label, _) in _SIGNAL_DISPLAY.items():
@@ -625,6 +630,7 @@ def main() -> None:
             "Max File Exfil (day)": "max_file_exfil_norm",
             "Max USB (day)":        "max_usb_norm",
             "IF Inverted":          "if_inverted_norm",
+            "Flagged Day Rate":     "flagged_day_norm",
         }
         sig_df = pd.DataFrame({"Signal": list(signals.keys()),
                                "Value":  list(signals.values())})
@@ -712,7 +718,7 @@ This system implements a *multi-signal evidence aggregation* algorithm:
         st.success(
             f"**Best overall setup (GA-optimised + user-level evaluation):**  \n"
             f"Model: **LSTM Autoencoder** | Aggregation: **score_p95** | "
-            f"Threshold: **90th percentile** | K = **{m.get('k', 50)}**  \n"
+            f"Threshold: **80th percentile** | K = **{m.get('k', 50)}**  \n"
             f"→ GA F1 = **{m.get('f1', 0):.4f}** "
             f"(baseline {bm.get('f1', 0):.4f}, Δ{im.get('delta_f1', 0):+.4f})  "
             f"| **{m.get('tp', 0)} / {len(insider_users)} insiders detected**  \n\n"
@@ -723,7 +729,7 @@ This system implements a *multi-signal evidence aggregation* algorithm:
         st.success(
             "**Best overall setup (from user-level evaluation):**  \n"
             "Model: **LSTM Autoencoder** | Aggregation: **score_p95** | "
-            "Threshold: **90th percentile** | K = **50**  \n"
+            "Threshold: **80th percentile** | K = **50**  \n"
             f"→ Precision/Recall/F1 depend on the auto-selected CERT release; "
             f"currently tracking **{len(insider_users)} matching insider users**.  \n\n"
             "At K=20, Precision rises to **0.50** — half of the flagged users are real insiders.  \n"

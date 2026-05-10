@@ -160,6 +160,9 @@ _FLAG_RULES: list[tuple[str, str, float, str]] = [
     # Idea 1: inverted IF flag
     ("if_inverted_norm",           ">=", 0.60,
      "User appears unusually normal to Isolation Forest (low-anomaly masking)"),
+    # Idea 6: persistent anomaly flag
+    ("flagged_day_norm",           ">=", 0.60,
+     "Elevated LSTM anomaly on many days — persistent, not just single-day spike"),
 ]
 
 
@@ -298,13 +301,16 @@ def compute_risk_scores(
     ]
     avail_behav = [c for c in behav_cols if c in behavioral_df.columns]
 
-    df = lstm_user_df[["user", "score_p95", "dataset_split"]].merge(
+    # Idea 5 & 6: pull score_max and score_flag_rate if the caller provided them
+    lstm_extra = [c for c in ["score_max", "score_flag_rate"]
+                  if c in lstm_user_df.columns]
+    df = lstm_user_df[["user", "score_p95", "dataset_split"] + lstm_extra].merge(
         behavioral_df[avail_behav],
         on="user", how="left",
     ).fillna(0)
 
-    # Back-fill max columns if older behavioral_df lacks them
-    for col in ["max_daily_file_exfil", "max_daily_usb"]:
+    # Back-fill optional columns if caller didn't supply them
+    for col in ["max_daily_file_exfil", "max_daily_usb", "score_max", "score_flag_rate"]:
         if col not in df.columns:
             df[col] = 0.0
 
@@ -344,12 +350,20 @@ def compute_risk_scores(
     df["max_file_exfil_norm"] = _minmax(df["max_daily_file_exfil"])
     df["max_usb_norm"]        = _minmax(df["max_daily_usb"])
 
+    # Idea 5: blended LSTM signal (p95 anchors on chronic behaviour; max on spikes)
+    df["lstm_max_norm"]  = _minmax(df["score_max"])
+    lstm_signal_norm     = 0.7 * df["lstm_p95_norm"] + 0.3 * df["lstm_max_norm"]
+
+    # Idea 6: fraction of days with elevated LSTM score (persistent vs one-off)
+    df["flagged_day_norm"] = _minmax(df["score_flag_rate"])
+
     # Idea 1: inverted IF signal (insiders score LOW on IF → invert so they score HIGH)
     df["if_inverted_norm"] = 1.0 - _minmax(df["if_score_p95"]) if has_if else 0.0
 
     # Base 7-signal weighted score (GA-optimisable, WEIGHTS unchanged)
+    # Idea 5: use blended lstm_signal_norm instead of raw lstm_p95_norm
     base_score = (
-        WEIGHTS["lstm_p95"]             * df["lstm_p95_norm"]
+        WEIGHTS["lstm_p95"]             * lstm_signal_norm
       + WEIGHTS["after_hours"]          * df["after_hours_norm"]
       + WEIGHTS["bcc_usage"]            * df["bcc_usage_norm"]
       + WEIGHTS["file_exfil"]           * df["file_exfil_norm"]
@@ -358,8 +372,12 @@ def compute_risk_scores(
       + WEIGHTS["content_sensitivity"]  * df["content_sensitivity_norm"]
     )
 
-    # Idea 2: burst supplement — single-day spike score (fixed blend, outside GA)
-    burst_score = 0.5 * df["max_file_exfil_norm"] + 0.5 * df["max_usb_norm"]
+    # Idea 2+6: burst/persistence supplement (fixed blend, outside GA)
+    burst_score = (
+        0.35 * df["max_file_exfil_norm"]
+      + 0.35 * df["max_usb_norm"]
+      + 0.30 * df["flagged_day_norm"]
+    )
 
     # Final blend: 75% GA-tunable base + 15% burst + 10% IF (when available)
     if has_if:
@@ -395,6 +413,7 @@ def build_investigation_queue(risk_df: pd.DataFrame, top_n: int = 50) -> pd.Data
         "file_exfil_norm", "usb_activity_norm", "multi_pc_norm",
         "content_sensitivity_norm",
         "max_file_exfil_norm", "max_usb_norm", "if_inverted_norm",
+        "flagged_day_norm",
     ]
     for opt in ("is_insider", "explanation"):
         if opt in risk_df.columns:

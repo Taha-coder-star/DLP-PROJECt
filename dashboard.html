@@ -1,0 +1,774 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>UEBA — Insider Threat Detection Dashboard</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --surface2: #222535;
+    --border: #2e3148;
+    --accent: #4c9be8;
+    --danger: #e85454;
+    --success: #5cb85c;
+    --warning: #f4a83a;
+    --text: #e2e8f0;
+    --muted: #8892a4;
+    --gold: #f4c542;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', system-ui, sans-serif; background: var(--bg); color: var(--text); line-height: 1.5; }
+
+  /* ── Header ── */
+  .header { background: linear-gradient(135deg, #1a1d27 0%, #12152a 100%); border-bottom: 1px solid var(--border); padding: 28px 40px 24px; }
+  .header-top { display: flex; align-items: center; gap: 14px; margin-bottom: 6px; }
+  .header h1 { font-size: 1.7rem; font-weight: 700; letter-spacing: -0.3px; }
+  .badge { font-size: 0.7rem; font-weight: 700; padding: 3px 10px; border-radius: 20px; letter-spacing: 0.5px; text-transform: uppercase; }
+  .badge-success { background: rgba(92,184,92,0.15); color: var(--success); border: 1px solid rgba(92,184,92,0.3); }
+  .badge-accent  { background: rgba(76,155,232,0.15); color: var(--accent);  border: 1px solid rgba(76,155,232,0.3); }
+  .badge-gold    { background: rgba(244,197,66,0.15);  color: var(--gold);   border: 1px solid rgba(244,197,66,0.3); }
+  .header-sub { color: var(--muted); font-size: 0.9rem; max-width: 800px; }
+  .cert-tag { display: inline-block; background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; padding: 2px 10px; font-size: 0.78rem; color: var(--accent); font-weight: 600; margin-top: 8px; }
+
+  /* ── KPI strip ── */
+  .kpi-strip { display: grid; grid-template-columns: repeat(6, 1fr); gap: 1px; background: var(--border); border-bottom: 1px solid var(--border); }
+  .kpi { background: var(--surface); padding: 18px 20px; text-align: center; }
+  .kpi-val { font-size: 1.8rem; font-weight: 800; }
+  .kpi-label { font-size: 0.72rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; margin-top: 2px; }
+  .kpi-sub { font-size: 0.7rem; color: var(--muted); margin-top: 2px; }
+  .kpi-val.accent  { color: var(--accent); }
+  .kpi-val.success { color: var(--success); }
+  .kpi-val.danger  { color: var(--danger); }
+  .kpi-val.gold    { color: var(--gold); }
+
+  /* ── Layout ── */
+  .container { max-width: 1400px; margin: 0 auto; padding: 32px 24px; }
+  .section { margin-bottom: 48px; }
+  .section-title { font-size: 1.05rem; font-weight: 700; color: var(--text); margin-bottom: 16px; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--border); padding-bottom: 10px; }
+  .section-title .icon { font-size: 1.1rem; }
+
+  /* ── Tabs ── */
+  .tabs { display: flex; gap: 0; border-bottom: 2px solid var(--border); margin-bottom: 24px; flex-wrap: wrap; }
+  .tab { padding: 10px 20px; cursor: pointer; font-size: 0.88rem; font-weight: 600; color: var(--muted); border-bottom: 2px solid transparent; margin-bottom: -2px; transition: color 0.15s; white-space: nowrap; }
+  .tab:hover { color: var(--text); }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .tab-content { display: none; }
+  .tab-content.active { display: block; }
+
+  /* ── Cards ── */
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 24px; }
+  .card-title { font-size: 0.82rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); margin-bottom: 16px; }
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; }
+
+  /* ── Result box ── */
+  .result-box { border-radius: 10px; padding: 24px; border: 1px solid; }
+  .result-box.final { background: rgba(92,184,92,0.07); border-color: rgba(92,184,92,0.3); }
+  .result-box.standalone { background: rgba(76,155,232,0.07); border-color: rgba(76,155,232,0.3); }
+  .result-box.info { background: rgba(244,168,58,0.07); border-color: rgba(244,168,58,0.3); }
+  .result-box h3 { font-size: 0.9rem; font-weight: 700; margin-bottom: 14px; }
+  .result-box h3.gold { color: var(--gold); }
+  .result-box h3.blue { color: var(--accent); }
+  .result-box h3.amber { color: var(--warning); }
+
+  /* ── Metric grid inside result box ── */
+  .metric-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 14px; }
+  .metric-tile { background: var(--surface2); border-radius: 8px; padding: 12px 14px; text-align: center; }
+  .metric-tile .val { font-size: 1.4rem; font-weight: 800; }
+  .metric-tile .lbl { font-size: 0.68rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.4px; margin-top: 2px; }
+
+  /* ── Tables ── */
+  table { width: 100%; border-collapse: collapse; font-size: 0.84rem; }
+  th { background: var(--surface2); color: var(--muted); font-weight: 700; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.4px; padding: 9px 12px; text-align: right; border-bottom: 1px solid var(--border); }
+  th:first-child { text-align: left; }
+  td { padding: 9px 12px; border-bottom: 1px solid var(--border); text-align: right; }
+  td:first-child { text-align: left; font-weight: 600; }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: rgba(255,255,255,0.02); }
+  .best-row td { color: var(--success); }
+  .td-highlight { font-weight: 700; color: var(--gold); }
+
+  /* ── Progress bars ── */
+  .prog-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+  .prog-label { font-size: 0.8rem; color: var(--muted); width: 160px; flex-shrink: 0; }
+  .prog-bar-wrap { flex: 1; background: var(--surface2); border-radius: 4px; height: 10px; overflow: hidden; }
+  .prog-bar { height: 100%; border-radius: 4px; transition: width 0.4s; }
+  .prog-val { font-size: 0.8rem; font-weight: 700; width: 48px; text-align: right; flex-shrink: 0; }
+
+  /* ── Image grid ── */
+  .img-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 16px; }
+  .img-card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  .img-card img { width: 100%; display: block; background: #fff; }
+  .img-cap { padding: 10px 14px; font-size: 0.78rem; color: var(--muted); font-weight: 600; }
+
+  /* ── Improvement arrow ── */
+  .arrow-table { width: 100%; }
+  .arrow-row { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 0.85rem; }
+  .arrow-row:last-child { border-bottom: none; }
+  .arrow-label { width: 100px; color: var(--muted); font-size: 0.78rem; flex-shrink: 0; }
+  .arrow-from { color: var(--muted); font-weight: 600; }
+  .arrow-icon { color: var(--success); font-size: 1rem; }
+  .arrow-to { color: var(--success); font-weight: 800; font-size: 1rem; }
+  .delta { font-size: 0.72rem; color: var(--success); margin-left: 6px; }
+
+  /* ── Pipeline steps ── */
+  .steps { display: flex; flex-direction: column; gap: 0; }
+  .step { display: flex; gap: 16px; padding: 16px 0; border-bottom: 1px solid var(--border); }
+  .step:last-child { border-bottom: none; }
+  .step-num { width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 0.75rem; font-weight: 800; flex-shrink: 0; margin-top: 2px; }
+  .step-num.blue  { background: rgba(76,155,232,0.2);  color: var(--accent); }
+  .step-num.green { background: rgba(92,184,92,0.2);   color: var(--success); }
+  .step-num.gold  { background: rgba(244,197,66,0.2);  color: var(--gold); }
+  .step-num.amber { background: rgba(244,168,58,0.2);  color: var(--warning); }
+  .step-body h4 { font-size: 0.88rem; font-weight: 700; margin-bottom: 4px; }
+  .step-body p  { font-size: 0.8rem; color: var(--muted); line-height: 1.5; }
+  .step-body code { background: var(--surface2); padding: 1px 6px; border-radius: 4px; font-size: 0.78rem; font-family: monospace; color: var(--accent); }
+
+  /* ── Signal weights ── */
+  .coef-pos { color: var(--danger); }
+  .coef-neg { color: var(--accent); }
+
+  /* ── Footer ── */
+  .footer { background: var(--surface); border-top: 1px solid var(--border); padding: 20px 40px; text-align: center; font-size: 0.78rem; color: var(--muted); margin-top: 40px; }
+
+  /* ── Responsive ── */
+  @media (max-width: 900px) {
+    .kpi-strip { grid-template-columns: repeat(3, 1fr); }
+    .grid-2, .grid-3 { grid-template-columns: 1fr; }
+    .img-grid { grid-template-columns: 1fr; }
+    .metric-grid { grid-template-columns: repeat(2, 1fr); }
+  }
+  @media (max-width: 600px) {
+    .kpi-strip { grid-template-columns: repeat(2, 1fr); }
+    .header { padding: 20px 16px; }
+    .container { padding: 20px 12px; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ══ HEADER ══════════════════════════════════════════════════════════════ -->
+<div class="header">
+  <div class="header-top">
+    <span style="font-size:1.6rem">🔒</span>
+    <h1>UEBA — Insider Threat Detection System</h1>
+    <span class="badge badge-gold">Phase 4 Complete</span>
+    <span class="badge badge-success">Meta-Model Active</span>
+  </div>
+  <p class="header-sub">
+    User and Entity Behaviour Analytics pipeline built on the CERT r4.2 insider threat dataset.
+    LSTM Autoencoder + Isolation Forest + 13 normalised signals, combined by a supervised meta-model ensemble.
+  </p>
+  <div class="cert-tag">📂 CERT Insider Threat Dataset r4.2 &nbsp;|&nbsp; 1,000 users &nbsp;|&nbsp; 70 confirmed insiders &nbsp;|&nbsp; ~2.9M email records</div>
+</div>
+
+<!-- ══ KPI STRIP ════════════════════════════════════════════════════════════ -->
+<div class="kpi-strip">
+  <div class="kpi">
+    <div class="kpi-val gold">38 / 70</div>
+    <div class="kpi-label">Insiders Detected</div>
+    <div class="kpi-sub">Meta-Model @ K=50</div>
+  </div>
+  <div class="kpi">
+    <div class="kpi-val success">0.6333</div>
+    <div class="kpi-label">F1 Score</div>
+    <div class="kpi-sub">Final System</div>
+  </div>
+  <div class="kpi">
+    <div class="kpi-val accent">0.7600</div>
+    <div class="kpi-label">Precision</div>
+    <div class="kpi-sub">Meta-Model @ K=50</div>
+  </div>
+  <div class="kpi">
+    <div class="kpi-val accent">0.9671</div>
+    <div class="kpi-label">CV ROC-AUC</div>
+    <div class="kpi-sub">5-fold cross-validation</div>
+  </div>
+  <div class="kpi">
+    <div class="kpi-val success">0.9309</div>
+    <div class="kpi-label">LSTM Day ROC-AUC</div>
+    <div class="kpi-sub">Test split</div>
+  </div>
+  <div class="kpi">
+    <div class="kpi-val" style="color:var(--warning)">13</div>
+    <div class="kpi-label">Normalised Signals</div>
+    <div class="kpi-sub">38 raw LSTM features</div>
+  </div>
+</div>
+
+<!-- ══ MAIN ════════════════════════════════════════════════════════════════ -->
+<div class="container">
+
+  <!-- ── Tabs ─────────────────────────────────────────────────────────── -->
+  <div class="tabs">
+    <div class="tab active" onclick="switchTab('results')">🏆 Final Results</div>
+    <div class="tab" onclick="switchTab('metrics')">📊 Detection Metrics</div>
+    <div class="tab" onclick="switchTab('charts')">📈 Charts</div>
+    <div class="tab" onclick="switchTab('pipeline')">🤖 Pipeline</div>
+    <div class="tab" onclick="switchTab('roc')">🔬 ROC / Day-Level</div>
+  </div>
+
+  <!-- ════════════════════════════════════════════════════════════════════ -->
+  <!-- TAB 1 — FINAL RESULTS                                                -->
+  <!-- ════════════════════════════════════════════════════════════════════ -->
+  <div id="tab-results" class="tab-content active">
+
+    <div class="grid-2" style="margin-bottom:20px">
+
+      <!-- Final System -->
+      <div class="result-box final">
+        <h3 class="gold">🏆 Final System — Meta-Model Ensemble ★</h3>
+        <p style="font-size:0.82rem;color:var(--muted);margin-bottom:14px">
+          Supervised Logistic Regression stacked on 13 normalised signals.<br>
+          Trained on CERT r4.2 ground-truth labels (train-split users only).
+        </p>
+        <div class="metric-grid">
+          <div class="metric-tile">
+            <div class="val" style="color:var(--gold)">38 / 70</div>
+            <div class="lbl">TP (K=50)</div>
+          </div>
+          <div class="metric-tile">
+            <div class="val" style="color:var(--success)">0.6333</div>
+            <div class="lbl">F1</div>
+          </div>
+          <div class="metric-tile">
+            <div class="val" style="color:var(--accent)">0.7600</div>
+            <div class="lbl">Precision</div>
+          </div>
+          <div class="metric-tile">
+            <div class="val" style="color:var(--accent)">0.5429</div>
+            <div class="lbl">Recall</div>
+          </div>
+          <div class="metric-tile">
+            <div class="val" style="color:var(--accent)">0.9671</div>
+            <div class="lbl">CV ROC-AUC</div>
+          </div>
+          <div class="metric-tile">
+            <div class="val" style="color:var(--accent)">0.7394</div>
+            <div class="lbl">CV Avg-Prec</div>
+          </div>
+        </div>
+
+        <div style="margin-top:18px">
+          <table>
+            <thead><tr><th>K</th><th>TP</th><th>FP</th><th>FN</th><th>Precision</th><th>Recall</th><th>F1</th></tr></thead>
+            <tbody>
+              <tr><td>10</td><td>9</td><td>1</td><td>61</td><td>0.9000</td><td>0.1286</td><td>0.2250</td></tr>
+              <tr><td>20</td><td>19</td><td>1</td><td>51</td><td>0.9500</td><td>0.2714</td><td>0.4222</td></tr>
+              <tr class="best-row"><td>50 ★</td><td class="td-highlight">38</td><td>12</td><td>32</td><td class="td-highlight">0.7600</td><td>0.5429</td><td class="td-highlight">0.6333</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Right column -->
+      <div style="display:flex;flex-direction:column;gap:20px">
+
+        <!-- Standalone best -->
+        <div class="result-box standalone">
+          <h3 class="blue">📡 Best Standalone Detector (Unsupervised)</h3>
+          <p style="font-size:0.82rem;color:var(--muted);margin-bottom:14px">LSTM Autoencoder — score_p95, 90th pct threshold, K=50</p>
+          <div class="metric-grid">
+            <div class="metric-tile">
+              <div class="val" style="color:var(--accent)">23 / 70</div>
+              <div class="lbl">TP</div>
+            </div>
+            <div class="metric-tile">
+              <div class="val" style="color:var(--accent)">0.3833</div>
+              <div class="lbl">F1</div>
+            </div>
+            <div class="metric-tile">
+              <div class="val" style="color:var(--accent)">0.4600</div>
+              <div class="lbl">Precision</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Improvement -->
+        <div class="result-box info">
+          <h3 class="amber">📈 Improvement: Standalone → Meta-Model</h3>
+          <div style="margin-top:4px">
+            <div class="arrow-row">
+              <span class="arrow-label">Insiders found</span>
+              <span class="arrow-from">23 / 70</span>
+              <span class="arrow-icon">→</span>
+              <span class="arrow-to">38 / 70</span>
+              <span class="delta">+15</span>
+            </div>
+            <div class="arrow-row">
+              <span class="arrow-label">Precision</span>
+              <span class="arrow-from">0.4600</span>
+              <span class="arrow-icon">→</span>
+              <span class="arrow-to">0.7600</span>
+              <span class="delta">+0.3000</span>
+            </div>
+            <div class="arrow-row">
+              <span class="arrow-label">Recall</span>
+              <span class="arrow-from">0.3286</span>
+              <span class="arrow-icon">→</span>
+              <span class="arrow-to">0.5429</span>
+              <span class="delta">+0.2143</span>
+            </div>
+            <div class="arrow-row">
+              <span class="arrow-label">F1</span>
+              <span class="arrow-from">0.3833</span>
+              <span class="arrow-icon">→</span>
+              <span class="arrow-to">0.6333</span>
+              <span class="delta">+0.2500</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- LR Coefficients -->
+        <div class="card">
+          <div class="card-title">Meta-Model Signal Weights (LR Coefficients)</div>
+          <div class="prog-row"><span class="prog-label">LSTM P95</span><div class="prog-bar-wrap"><div class="prog-bar" style="width:100%;background:var(--danger)"></div></div><span class="prog-val coef-pos">+1.75</span></div>
+          <div class="prog-row"><span class="prog-label">LSTM Max</span><div class="prog-bar-wrap"><div class="prog-bar" style="width:93%;background:var(--danger)"></div></div><span class="prog-val coef-pos">+1.63</span></div>
+          <div class="prog-row"><span class="prog-label">Max USB (day)</span><div class="prog-bar-wrap"><div class="prog-bar" style="width:83%;background:var(--danger)"></div></div><span class="prog-val coef-pos">+1.46</span></div>
+          <div class="prog-row"><span class="prog-label">File Exfil</span><div class="prog-bar-wrap"><div class="prog-bar" style="width:83%;background:var(--danger)"></div></div><span class="prog-val coef-pos">+1.46</span></div>
+          <div class="prog-row"><span class="prog-label">BCC Usage</span><div class="prog-bar-wrap"><div class="prog-bar" style="width:72%;background:var(--accent)"></div></div><span class="prog-val coef-neg">−1.25</span></div>
+          <div class="prog-row"><span class="prog-label">Multi-PC</span><div class="prog-bar-wrap"><div class="prog-bar" style="width:56%;background:var(--danger)"></div></div><span class="prog-val coef-pos">+0.99</span></div>
+          <div class="prog-row"><span class="prog-label">USB Activity</span><div class="prog-bar-wrap"><div class="prog-bar" style="width:46%;background:var(--accent)"></div></div><span class="prog-val coef-neg">−0.81</span></div>
+          <div class="prog-row"><span class="prog-label">Flagged Day Rate</span><div class="prog-bar-wrap"><div class="prog-bar" style="width:27%;background:var(--accent)"></div></div><span class="prog-val coef-neg">−0.47</span></div>
+          <p style="font-size:0.72rem;color:var(--muted);margin-top:8px">Red = insider indicator (↑ score → more suspicious). Blue = protective signal.</p>
+        </div>
+
+      </div>
+    </div><!-- /grid-2 -->
+
+    <!-- 3-way voting -->
+    <div class="card">
+      <div class="card-title">Idea 14 — 3-Way Majority Voting Ensemble (LSTM ∪ IF ∪ Risk — ≥2/3 votes)</div>
+      <table>
+        <thead>
+          <tr><th>K</th><th>Flagged</th><th>LSTM pool</th><th>IF pool</th><th>Risk pool</th><th>TP</th><th>FP</th><th>FN</th><th>Precision</th><th>Recall</th><th>F1</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>10</td><td>0</td><td>10</td><td>10</td><td>10</td><td>0</td><td>0</td><td>70</td><td>0.0000</td><td>0.0000</td><td>0.0000</td></tr>
+          <tr><td>20</td><td>5</td><td>20</td><td>20</td><td>20</td><td>0</td><td>5</td><td>70</td><td>0.0000</td><td>0.0000</td><td>0.0000</td></tr>
+          <tr><td>50</td><td>22</td><td>50</td><td>50</td><td>50</td><td>7</td><td>15</td><td>63</td><td>0.3182</td><td>0.1000</td><td>0.1522</td></tr>
+        </tbody>
+      </table>
+      <p style="font-size:0.75rem;color:var(--muted);margin-top:10px">
+        Note: The 3-way voting uses LSTM top-K, IF bottom-K (inverted), and Risk top-K. Low overlap between these three rankers reduces the voted set to near-zero at K=10/20.
+        The supervised meta-model (Idea 13) significantly outperforms this unsupervised ensemble.
+      </p>
+    </div>
+
+  </div><!-- /tab-results -->
+
+  <!-- ════════════════════════════════════════════════════════════════════ -->
+  <!-- TAB 2 — DETECTION METRICS                                             -->
+  <!-- ════════════════════════════════════════════════════════════════════ -->
+  <div id="tab-metrics" class="tab-content">
+
+    <div class="section">
+      <div class="section-title"><span class="icon">🧱</span>Isolation Forest — User-Level Top-K</div>
+      <div class="card">
+        <table>
+          <thead>
+            <tr><th>Aggregation</th><th>Threshold</th><th>Pool</th><th>K</th><th>TP</th><th>FP</th><th>FN</th><th>Precision</th><th>Recall</th><th>F1</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>score_max</td><td>90%</td><td>100</td><td>10</td><td>5</td><td>5</td><td>65</td><td>0.5000</td><td>0.0714</td><td>0.1250</td></tr>
+            <tr><td>score_max</td><td>90%</td><td>100</td><td>20</td><td>7</td><td>13</td><td>63</td><td>0.3500</td><td>0.1000</td><td>0.1556</td></tr>
+            <tr class="best-row"><td>score_max</td><td>90%</td><td>100</td><td>50</td><td class="td-highlight">15</td><td>35</td><td>55</td><td class="td-highlight">0.3000</td><td class="td-highlight">0.2143</td><td class="td-highlight">0.2500 ★</td></tr>
+            <tr><td>score_p95</td><td>90%</td><td>100</td><td>10</td><td>5</td><td>5</td><td>65</td><td>0.5000</td><td>0.0714</td><td>0.1250</td></tr>
+            <tr><td>score_p95</td><td>90%</td><td>100</td><td>20</td><td>5</td><td>15</td><td>65</td><td>0.2500</td><td>0.0714</td><td>0.1111</td></tr>
+            <tr><td>score_p95</td><td>90%</td><td>100</td><td>50</td><td>5</td><td>45</td><td>65</td><td>0.1000</td><td>0.0714</td><td>0.0833</td></tr>
+            <tr><td>score_mean</td><td>90%</td><td>100</td><td>50</td><td>6</td><td>44</td><td>64</td><td>0.1200</td><td>0.0857</td><td>0.1000</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title"><span class="icon">🧠</span>LSTM Autoencoder — User-Level Top-K</div>
+      <div class="card">
+        <table>
+          <thead>
+            <tr><th>Aggregation</th><th>Threshold</th><th>Pool</th><th>K</th><th>TP</th><th>FP</th><th>FN</th><th>Precision</th><th>Recall</th><th>F1</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>score_max</td><td>90%</td><td>263</td><td>50</td><td>14</td><td>36</td><td>56</td><td>0.2800</td><td>0.2000</td><td>0.2333</td></tr>
+            <tr><td>score_mean</td><td>90%</td><td>100</td><td>50</td><td>7</td><td>43</td><td>63</td><td>0.1400</td><td>0.1000</td><td>0.1167</td></tr>
+            <tr><td>score_p95</td><td>90%</td><td>100</td><td>10</td><td>4</td><td>6</td><td>66</td><td>0.4000</td><td>0.0571</td><td>0.1000</td></tr>
+            <tr><td>score_p95</td><td>90%</td><td>100</td><td>20</td><td>9</td><td>11</td><td>61</td><td>0.4500</td><td>0.1286</td><td>0.2000</td></tr>
+            <tr class="best-row"><td>score_p95</td><td>90%</td><td>100</td><td>50</td><td class="td-highlight">23</td><td>27</td><td>47</td><td class="td-highlight">0.4600</td><td class="td-highlight">0.3286</td><td class="td-highlight">0.3833 ★</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title"><span class="icon">⚡</span>Best F1 Per Model × Aggregation</div>
+      <div class="card">
+        <table>
+          <thead>
+            <tr><th>Model</th><th>Aggregation</th><th>Best F1</th><th>Precision</th><th>Recall</th><th>TP</th></tr>
+          </thead>
+          <tbody>
+            <tr class="best-row"><td>LSTM Autoencoder ★</td><td>score_p95</td><td class="td-highlight">0.3833</td><td>0.4600</td><td>0.3286</td><td class="td-highlight">23</td></tr>
+            <tr><td>Isolation Forest</td><td>score_max</td><td>0.2500</td><td>0.3000</td><td>0.2143</td><td>15</td></tr>
+            <tr><td>LSTM Autoencoder</td><td>score_max</td><td>0.2333</td><td>0.2800</td><td>0.2000</td><td>14</td></tr>
+            <tr><td>LSTM Autoencoder</td><td>score_mean</td><td>0.1167</td><td>0.1400</td><td>0.1000</td><td>7</td></tr>
+            <tr><td>Isolation Forest</td><td>score_mean</td><td>0.1111</td><td>0.2500</td><td>0.0714</td><td>5</td></tr>
+            <tr><td>Isolation Forest</td><td>score_p95</td><td>0.1250</td><td>0.5000</td><td>0.0714</td><td>5</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title"><span class="icon">🔗</span>OR Ensemble — LSTM ∪ IF (Intermediate)</div>
+      <div class="card">
+        <table>
+          <thead>
+            <tr><th>K</th><th>LSTM pool</th><th>IF pool</th><th>Union</th><th>TP</th><th>FP</th><th>FN</th><th>Precision</th><th>Recall</th><th>F1</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>10</td><td>10</td><td>10</td><td>20</td><td>4</td><td>16</td><td>66</td><td>0.2000</td><td>0.0571</td><td>0.0889</td></tr>
+            <tr><td>20</td><td>20</td><td>20</td><td>40</td><td>9</td><td>31</td><td>61</td><td>0.2250</td><td>0.1286</td><td>0.1636</td></tr>
+            <tr><td>50</td><td>50</td><td>50</td><td>100</td><td>22</td><td>78</td><td>48</td><td>0.2200</td><td>0.3143</td><td>0.2588</td></tr>
+          </tbody>
+        </table>
+        <p style="font-size:0.75rem;color:var(--muted);margin-top:10px">Superseded by the supervised meta-model (Phase 4).</p>
+      </div>
+    </div>
+
+  </div><!-- /tab-metrics -->
+
+  <!-- ════════════════════════════════════════════════════════════════════ -->
+  <!-- TAB 3 — CHARTS                                                        -->
+  <!-- ════════════════════════════════════════════════════════════════════ -->
+  <div id="tab-charts" class="tab-content">
+
+    <div class="section">
+      <div class="section-title"><span class="icon">📊</span>User-Level Evaluation Plots</div>
+      <div class="img-grid">
+        <div class="img-card">
+          <img src="pr_f1_vs_k.png" alt="Precision/Recall/F1 vs K" loading="lazy">
+          <div class="img-cap">Precision / Recall / F1 vs K — LSTM score_p95</div>
+        </div>
+        <div class="img-card">
+          <img src="aggregation_comparison.png" alt="Aggregation Comparison" loading="lazy">
+          <div class="img-cap">Score aggregation comparison (max / mean / p95) across K values</div>
+        </div>
+        <div class="img-card">
+          <img src="model_comparison.png" alt="Model Comparison" loading="lazy">
+          <div class="img-cap">IF vs LSTM — best F1 per model across all configurations</div>
+        </div>
+        <div class="img-card">
+          <img src="score_distribution.png" alt="Score Distribution" loading="lazy">
+          <div class="img-cap">Risk score distribution: insiders vs normal users</div>
+        </div>
+        <div class="img-card">
+          <img src="top_users_risk.png" alt="Top Users Risk" loading="lazy">
+          <div class="img-cap">Top 20 suspicious users ranked by risk score (red ★ = confirmed insider)</div>
+        </div>
+        <div class="img-card">
+          <img src="tp_fp_fn_summary.png" alt="TP/FP/FN Summary" loading="lazy">
+          <div class="img-cap">Detection outcomes (TP / FP / FN) across K values</div>
+        </div>
+        <div class="img-card">
+          <img src="top_users_by_anomaly_score.png" alt="Top Users by Anomaly Score" loading="lazy">
+          <div class="img-cap">Top users by Isolation Forest anomaly score</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title"><span class="icon">🧠</span>LSTM Autoencoder Analysis</div>
+      <div class="img-grid">
+        <div class="img-card">
+          <img src="lstm_score_distribution.png" alt="LSTM Score Distribution" loading="lazy">
+          <div class="img-cap">LSTM reconstruction error: insiders vs normal users</div>
+        </div>
+        <div class="img-card">
+          <img src="lstm_top_users_by_score.png" alt="LSTM Top Users" loading="lazy">
+          <div class="img-cap">Top users by LSTM anomaly score (score_p95)</div>
+        </div>
+        <div class="img-card">
+          <img src="lstm_top5_user_timelines.png" alt="LSTM Top-5 Timelines" loading="lazy">
+          <div class="img-cap">Daily LSTM score timelines for top-5 flagged users</div>
+        </div>
+        <div class="img-card">
+          <img src="lstm_daily_max_score.png" alt="LSTM Daily Max Score" loading="lazy">
+          <div class="img-cap">Daily max LSTM reconstruction error over time</div>
+        </div>
+        <div class="img-card">
+          <img src="lstm_email_count_vs_after_hours.png" alt="LSTM Feature Scatter" loading="lazy">
+          <div class="img-cap">LSTM latent space: email count vs after-hours ratio</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title"><span class="icon">🌲</span>Isolation Forest Analysis</div>
+      <div class="img-grid">
+        <div class="img-card">
+          <img src="iforest_score_distribution.png" alt="IF Score Distribution" loading="lazy">
+          <div class="img-cap">Isolation Forest score distribution: insiders vs normal</div>
+        </div>
+        <div class="img-card">
+          <img src="daily_max_anomaly_score.png" alt="Daily Max Anomaly" loading="lazy">
+          <div class="img-cap">Daily maximum IF anomaly score over time</div>
+        </div>
+        <div class="img-card">
+          <img src="email_count_vs_after_hours.png" alt="Feature Scatter" loading="lazy">
+          <div class="img-cap">IF feature space: email count vs after-hours ratio</div>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /tab-charts -->
+
+  <!-- ════════════════════════════════════════════════════════════════════ -->
+  <!-- TAB 4 — PIPELINE                                                      -->
+  <!-- ════════════════════════════════════════════════════════════════════ -->
+  <div id="tab-pipeline" class="tab-content">
+
+    <div class="grid-2">
+      <div class="card">
+        <div class="card-title">4-Phase Detection Pipeline</div>
+        <div class="steps">
+          <div class="step">
+            <div class="step-num blue">1</div>
+            <div class="step-body">
+              <h4>Data Cleaning &amp; Feature Engineering</h4>
+              <p>CERT r4.2 raw logs (email, logon, device, file) cleaned and merged into daily user-level features.
+              <code>38 behavioral features</code> including velocity deltas, cyclical time encoding (sin/cos hour/weekday),
+              and external recipient ratios. Train/val/test split by date.</p>
+            </div>
+          </div>
+          <div class="step">
+            <div class="step-num blue">2</div>
+            <div class="step-body">
+              <h4>Isolation Forest (Phase 1 &amp; 2)</h4>
+              <p>Density-based anomaly scoring on all 38 features. Phase 2 added velocity/delta signals,
+              external recipient ratio, and cyclical time encoding. With Phase 2 features, IF scores insiders
+              <strong>directly</strong> (higher = more suspicious). <code>iforest_score ∈ [0, 1]</code></p>
+            </div>
+          </div>
+          <div class="step">
+            <div class="step-num green">3</div>
+            <div class="step-body">
+              <h4>LSTM Autoencoder (Phase 1 &amp; 3)</h4>
+              <p>Global model trained on all users' 7-day sliding windows. Per-user z-score normalisation
+              applied before global MinMaxScaler — each user's features measured against their own baseline.
+              Mean reconstruction MSE is the anomaly score. Latent distance from training centroid captures
+              gradual behavioural drift. <code>score_p95</code> aggregation gives strongest signal.</p>
+            </div>
+          </div>
+          <div class="step">
+            <div class="step-num green">4</div>
+            <div class="step-body">
+              <h4>DLP Content Sensitivity</h4>
+              <p>Keyword/rule classifier scores email and file content as PUBLIC / INTERNAL / SENSITIVE / RESTRICTED.
+              Feeds into the risk score as <code>content_sensitivity_norm</code>.</p>
+            </div>
+          </div>
+          <div class="step">
+            <div class="step-num gold">5</div>
+            <div class="step-body">
+              <h4>13-Signal Normalised Risk Score</h4>
+              <p>LSTM P95, after-hours activity, BCC usage, file exfiltration, USB activity, multi-PC access,
+              burst-day spikes, content sensitivity, flagged-day rate, latent distance, IF score — each
+              scaled to [0, 1] and combined using domain-informed weights (optionally GA-optimised).</p>
+            </div>
+          </div>
+          <div class="step">
+            <div class="step-num gold">6</div>
+            <div class="step-body">
+              <h4>Phase 4 — Meta-Model Ensemble (Final System ★)</h4>
+              <p>Regularised Logistic Regression (<code>C=0.1, class_weight="balanced"</code>) trained on
+              all 13 normalised signals using CERT ground-truth labels (train-split only). 5-fold CV
+              ROC-AUC = <strong>0.9671</strong>. Learns a data-driven signal combination that significantly
+              outperforms any standalone anomaly detector.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div style="display:flex;flex-direction:column;gap:20px">
+
+        <div class="card">
+          <div class="card-title">Dataset: CERT r4.2</div>
+          <table>
+            <tbody>
+              <tr><td>Total users</td><td style="text-align:right;font-weight:700;color:var(--accent)">1,000</td></tr>
+              <tr><td>Confirmed insiders</td><td style="text-align:right;font-weight:700;color:var(--danger)">70</td></tr>
+              <tr><td>Insider prevalence</td><td style="text-align:right;font-weight:700;color:var(--warning)">7.0%</td></tr>
+              <tr><td>Email records</td><td style="text-align:right;font-weight:700">~2.9M</td></tr>
+              <tr><td>Email file size</td><td style="text-align:right;font-weight:700">1,299 MB</td></tr>
+              <tr><td>File access records</td><td style="text-align:right;font-weight:700">445,581</td></tr>
+              <tr><td>Logon records</td><td style="text-align:right;font-weight:700">854,859</td></tr>
+              <tr><td>Device records</td><td style="text-align:right;font-weight:700">405,380</td></tr>
+              <tr><td>Insider user-days</td><td style="text-align:right;font-weight:700;color:var(--danger)">1,892</td></tr>
+              <tr><td>LSTM features</td><td style="text-align:right;font-weight:700">38</td></tr>
+              <tr><td>Risk signals (normalised)</td><td style="text-align:right;font-weight:700">13</td></tr>
+              <tr><td>LSTM window size</td><td style="text-align:right;font-weight:700">7 days</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="card">
+          <div class="card-title">13 Normalised Signals</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:0.8rem">
+            <div style="padding:6px 10px;background:var(--surface2);border-radius:6px">📊 LSTM P95</div>
+            <div style="padding:6px 10px;background:var(--surface2);border-radius:6px">📊 LSTM Max</div>
+            <div style="padding:6px 10px;background:var(--surface2);border-radius:6px">🌙 After-Hours</div>
+            <div style="padding:6px 10px;background:var(--surface2);border-radius:6px">📧 BCC Usage</div>
+            <div style="padding:6px 10px;background:var(--surface2);border-radius:6px">📁 File Exfil</div>
+            <div style="padding:6px 10px;background:var(--surface2);border-radius:6px">💾 USB Activity</div>
+            <div style="padding:6px 10px;background:var(--surface2);border-radius:6px">🖥️ Multi-PC</div>
+            <div style="padding:6px 10px;background:var(--surface2);border-radius:6px">📦 Max Exfil (burst)</div>
+            <div style="padding:6px 10px;background:var(--surface2);border-radius:6px">📦 Max USB (burst)</div>
+            <div style="padding:6px 10px;background:var(--surface2);border-radius:6px">🔒 Content Sensitivity</div>
+            <div style="padding:6px 10px;background:var(--surface2);border-radius:6px">🚩 Flagged Day Rate</div>
+            <div style="padding:6px 10px;background:var(--surface2);border-radius:6px">📐 Latent Distance</div>
+            <div style="padding:6px 10px;background:var(--surface2);border-radius:6px">🌲 IF Score</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">Ground Truth Alignment</div>
+          <table>
+            <thead><tr><th>CERT Release</th><th>Insiders</th><th>Matched</th></tr></thead>
+            <tbody>
+              <tr><td>r4.2 ★</td><td style="text-align:right;color:var(--danger)">70</td><td style="text-align:right;color:var(--success)">70 / 70</td></tr>
+              <tr><td>r5.2</td><td style="text-align:right">99</td><td style="text-align:right;color:var(--muted)">0</td></tr>
+              <tr><td>r6.1 / r6.2</td><td style="text-align:right">5 / 5</td><td style="text-align:right;color:var(--muted)">0</td></tr>
+              <tr><td>r5.1</td><td style="text-align:right">4</td><td style="text-align:right;color:var(--muted)">0</td></tr>
+              <tr><td>r4.1</td><td style="text-align:right">3</td><td style="text-align:right;color:var(--muted)">0</td></tr>
+            </tbody>
+          </table>
+          <p style="font-size:0.72rem;color:var(--muted);margin-top:8px">Auto-selected r4.2 (70/70 match). All scored users are r4.2 employees.</p>
+        </div>
+      </div>
+
+    </div><!-- /grid-2 -->
+
+  </div><!-- /tab-pipeline -->
+
+  <!-- ════════════════════════════════════════════════════════════════════ -->
+  <!-- TAB 5 — ROC / DAY-LEVEL                                               -->
+  <!-- ════════════════════════════════════════════════════════════════════ -->
+  <div id="tab-roc" class="tab-content">
+
+    <div class="section">
+      <div class="section-title"><span class="icon">🔬</span>Day-Level Signal Diagnostics</div>
+      <p style="font-size:0.82rem;color:var(--muted);margin-bottom:16px">
+        These metrics measure raw day-level detection by IF/LSTM thresholds — intermediate diagnostics only.
+        Final user-level and meta-model results are shown in the <strong>Final Results</strong> tab.
+      </p>
+      <div class="card">
+        <table>
+          <thead>
+            <tr>
+              <th>Metric</th>
+              <th>IF Day (test)</th>
+              <th>IF Day (all)</th>
+              <th>IF User</th>
+              <th>LSTM Day (test)</th>
+              <th>LSTM Day (all)</th>
+              <th>LSTM User</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>ROC-AUC</td>
+              <td>0.7408</td><td>0.7369</td><td>0.8465</td>
+              <td class="td-highlight">0.9309</td><td>0.9152</td><td>0.8913</td>
+            </tr>
+            <tr>
+              <td>Avg Precision</td>
+              <td>0.0472</td><td>0.0084</td><td>0.2532</td>
+              <td class="td-highlight">0.2521</td><td>0.0785</td><td>0.2579</td>
+            </tr>
+            <tr>
+              <td>Precision</td>
+              <td>0.0417</td><td>0.0070</td><td>0.1791</td>
+              <td class="td-highlight">0.2058</td><td>0.0477</td><td>0.1443</td>
+            </tr>
+            <tr>
+              <td>Recall</td>
+              <td>0.0939</td><td>0.0859</td><td>0.7571</td>
+              <td class="td-highlight">0.6757</td><td>0.6355</td><td>1.0000</td>
+            </tr>
+            <tr>
+              <td>F1</td>
+              <td>0.0577</td><td>0.0130</td><td>0.2896</td>
+              <td class="td-highlight">0.3155</td><td>0.0887</td><td>0.2523</td>
+            </tr>
+            <tr>
+              <td>TP</td>
+              <td>104</td><td>115</td><td>53</td>
+              <td class="td-highlight">748</td><td>851</td><td>70</td>
+            </tr>
+            <tr>
+              <td>N insiders</td>
+              <td>1107</td><td>1339</td><td>70</td>
+              <td>1107</td><td>1339</td><td>70</td>
+            </tr>
+          </tbody>
+        </table>
+        <p style="font-size:0.75rem;color:var(--muted);margin-top:12px">
+          LSTM achieves the strongest day-level ROC-AUC (0.9309 test) — demonstrating that the LSTM autoencoder
+          reconstruction error is a strong signal for insider anomaly days, even before user-level aggregation.
+          Low precision at the day level is expected (rare event, dense non-insider days).
+        </p>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title"><span class="icon">📉</span>Key Observations</div>
+      <div class="grid-3">
+        <div class="result-box final">
+          <h3 class="gold" style="font-size:0.85rem;margin-bottom:10px">LSTM Best Aggregation</h3>
+          <p style="font-size:0.8rem;color:var(--muted)">
+            <code style="color:var(--accent)">score_max</code> rounds to 1.0 for virtually every user — no discriminative signal.<br><br>
+            <code style="color:var(--success)">score_p95</code> (per-user 95th percentile of daily scores) gives the strongest insider/normal separation.
+          </p>
+        </div>
+        <div class="result-box standalone">
+          <h3 class="blue" style="font-size:0.85rem;margin-bottom:10px">IF Phase 2 Direction</h3>
+          <p style="font-size:0.8rem;color:var(--muted)">
+            After Phase 2 feature engineering (velocity deltas, external recipients, cyclical time),
+            Isolation Forest scores insiders <strong>directly higher</strong> — not inverted.
+            Phase 2 features improved IF user-level ROC-AUC from ~0.75 to <strong>0.8465</strong>.
+          </p>
+        </div>
+        <div class="result-box info">
+          <h3 class="amber" style="font-size:0.85rem;margin-bottom:10px">Latent Distance (Phase 3)</h3>
+          <p style="font-size:0.8rem;color:var(--muted)">
+            LSTM latent distance from the training-period centroid captures <strong>gradual behavioural drift</strong>
+            that reconstruction error misses. Stored as <code style="color:var(--accent)">latent_dist_p95</code>,
+            contributed as a 13th signal to the meta-model feature matrix.
+          </p>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /tab-roc -->
+
+</div><!-- /container -->
+
+<!-- ══ FOOTER ════════════════════════════════════════════════════════════ -->
+<div class="footer">
+  UEBA Insider Threat Detection &nbsp;|&nbsp; CERT r4.2 Dataset &nbsp;|&nbsp; Phase 4 Complete &nbsp;|&nbsp;
+  Meta-Model: TP=38/70, F1=0.6333, CV ROC-AUC=0.9671 &nbsp;|&nbsp; Static dashboard — no server required
+</div>
+
+<script>
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach(function(t) { t.classList.remove('active'); });
+  document.querySelectorAll('.tab-content').forEach(function(c) { c.classList.remove('active'); });
+  event.currentTarget.classList.add('active');
+  document.getElementById('tab-' + name).classList.add('active');
+}
+</script>
+</body>
+</html>

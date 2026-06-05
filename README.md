@@ -40,16 +40,16 @@ DLP_ROOT=/content/dlp-data DLP_REPO=/content/dlp-project streamlit run /content/
 
 On Windows/local PowerShell, run from the repo root after placing raw CERT CSVs under `archive/`:
 
-```powershell
+powershell
 python colab/run_full_pipeline.py
 streamlit run app/ueba_dashboard_tabs.py
-```
+
 
 ## Required Raw Data
 
 Raw files are intentionally ignored by Git because they are large:
 
-```text
+text
 archive/email.csv
 archive/file.csv
 archive/logon.csv
@@ -61,13 +61,13 @@ Optional files such as `users.csv`, `ldap.csv`, and `decoy_file.csv` are used if
 
 The small ground-truth index is kept in Git:
 
-```text
+text
 archive/answers/answers/insiders.csv
-```
 
-## Main Files
 
-```text
+Main Files
+
+
 app/
   ueba_dashboard.py           Shared Streamlit dashboard logic
   ueba_dashboard_tabs.py      Main tabbed dashboard UI

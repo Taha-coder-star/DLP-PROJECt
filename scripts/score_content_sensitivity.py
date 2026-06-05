@@ -1,3 +1,4 @@
+
 """Content sensitivity scorer for email and file events.
 
 Applies lightweight keyword/rule-based classification to
